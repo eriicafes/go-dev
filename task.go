@@ -29,9 +29,11 @@ type Task struct {
 	active   atomic.Pointer[process]
 
 	reloadMu    sync.Mutex
+	processesMu sync.Mutex
+	processes   map[*process]struct{}
 	hooksMu     sync.Mutex
 	startHooks  []func(int)
-	reloadHooks []func(int)
+	reloadHooks []func(int, []string)
 	exitHooks   []func(int, error)
 	closeHooks  []func()
 	middlewares []Middleware
@@ -57,11 +59,12 @@ type process struct {
 
 func newTask(session *Session, cmd Cmd) (*Task, error) {
 	task := &Task{
-		session:  session,
-		cmd:      cmd,
-		done:     make(chan struct{}),
-		ready:    make(chan struct{}),
-		stopping: make(chan struct{}),
+		session:   session,
+		cmd:       cmd,
+		done:      make(chan struct{}),
+		ready:     make(chan struct{}),
+		stopping:  make(chan struct{}),
+		processes: make(map[*process]struct{}),
 	}
 	if task.cmd.ServerAddr == "" {
 		return task, nil
@@ -113,8 +116,9 @@ func (task *Task) OnStart(hook func(pid int)) {
 }
 
 // OnReload registers a callback to run asynchronously after a replacement
-// process becomes live. The callback receives the process ID.
-func (task *Task) OnReload(hook func(pid int)) {
+// process becomes live. The callback receives the process ID and the deduped
+// paths that caused the reload. Explicit reloads provide no paths.
+func (task *Task) OnReload(hook func(pid int, paths []string)) {
 	if hook == nil {
 		return
 	}
@@ -193,7 +197,7 @@ func (task *Task) start() error {
 	}
 	if len(task.cmd.Watch) != 0 {
 		// Configure source watching.
-		task.watcher = newWatcher(&task.cmd, task.Reload)
+		task.watcher = newWatcher(&task.cmd, task.reload)
 	}
 	for _, child := range task.cmd.Commands {
 		if child.Phase < 0 {
@@ -234,7 +238,7 @@ func (task *Task) start() error {
 		started <- nil
 	}()
 	// Start the initial process.
-	err := task.reload(task.session.ctx)
+	err := task.reload(nil)
 	childErr := <-started
 	if err != nil {
 		return err
@@ -297,9 +301,7 @@ func (task *Task) Close(ctx context.Context) error {
 		} else if task.listener != nil {
 			result = task.listener.Close()
 		}
-		if current := task.active.Load(); current != nil {
-			task.stopProcess(current, task.cmd.GracePeriod)
-		}
+		task.stopProcesses(task.snapshotProcesses(), task.cmd.GracePeriod)
 		// Children share this task's lifetime.
 		for _, child := range task.children {
 			result = errors.Join(result, child.Close(ctx))
@@ -318,9 +320,9 @@ func (task *Task) Close(ctx context.Context) error {
 
 // Reload starts a replacement process. Tasks with ServerAddr keep their
 // current process live until the replacement is ready.
-func (task *Task) Reload() error { return task.reload(task.session.ctx) }
+func (task *Task) Reload() error { return task.reload(nil) }
 
-func (task *Task) reload(ctx context.Context) error {
+func (task *Task) reload(paths []string) error {
 	// Serialize replacement creation and promotion.
 	task.reloadMu.Lock()
 	if task.closing.Load() {
@@ -332,7 +334,7 @@ func (task *Task) reload(ctx context.Context) error {
 		// Without a proxy, the old process cannot coexist with its replacement.
 		task.stopProcess(previous, task.cmd.GracePeriod)
 	}
-	next, err := task.startProcess(ctx)
+	next, err := task.startProcess(task.session.ctx)
 	if err != nil {
 		task.reloadMu.Unlock()
 		return err
@@ -341,11 +343,12 @@ func (task *Task) reload(ctx context.Context) error {
 	task.active.Store(next)
 	task.readyOnce.Do(func() { close(task.ready) })
 	task.hooksMu.Lock()
-	var hooks []func(int)
+	var startHooks []func(int)
+	var reloadHooks []func(int, []string)
 	if previous == nil {
-		hooks = append(hooks, task.startHooks...)
+		startHooks = append(startHooks, task.startHooks...)
 	} else {
-		hooks = append(hooks, task.reloadHooks...)
+		reloadHooks = append(reloadHooks, task.reloadHooks...)
 	}
 	task.hooksMu.Unlock()
 	// Hooks may reload or close the task, so release the reload lock first.
@@ -354,8 +357,11 @@ func (task *Task) reload(ctx context.Context) error {
 		// The proxy now directs new requests to next while previous drains.
 		go task.stopProcess(previous, task.cmd.GracePeriod)
 	}
-	for _, hook := range hooks {
+	for _, hook := range startHooks {
 		go hook(next.command.Process.Pid)
+	}
+	for _, hook := range reloadHooks {
+		go hook(next.command.Process.Pid, slices.Clone(paths))
 	}
 	return nil
 }
@@ -389,6 +395,9 @@ func (task *Task) startProcess(ctx context.Context) (*process, error) {
 		return nil, fmt.Errorf("dev: start process: %w", err)
 	}
 	process := &process{command: command, done: make(chan struct{}), url: target, cleanup: cleanup}
+	task.processesMu.Lock()
+	task.processes[process] = struct{}{}
+	task.processesMu.Unlock()
 	// Observe exit before waiting for health so an early exit ends the check.
 	go task.waitProcess(process)
 	if task.cmd.ServerAddr != "" && task.cmd.ServerHealthPath != "" {
@@ -406,6 +415,9 @@ func (task *Task) waitProcess(process *process) {
 	// Clean up process artifacts.
 	process.cleanup()
 	close(process.done)
+	task.processesMu.Lock()
+	delete(task.processes, process)
+	task.processesMu.Unlock()
 	task.hooksMu.Lock()
 	hooks := append([]func(int, error){}, task.exitHooks...)
 	task.hooksMu.Unlock()
@@ -491,6 +503,7 @@ func (task *Task) stopProcess(process *process, grace time.Duration) {
 	_ = interruptProcess(process.command)
 	if grace <= 0 {
 		_ = killProcess(process.command)
+		<-process.done
 		return
 	}
 	timer := time.NewTimer(grace)
@@ -499,7 +512,28 @@ func (task *Task) stopProcess(process *process, grace time.Duration) {
 	case <-process.done:
 	case <-timer.C:
 		_ = killProcess(process.command)
+		<-process.done
 	}
+}
+
+func (task *Task) snapshotProcesses() []*process {
+	task.processesMu.Lock()
+	defer task.processesMu.Unlock()
+	processes := make([]*process, 0, len(task.processes))
+	for process := range task.processes {
+		processes = append(processes, process)
+	}
+	return processes
+}
+
+func (task *Task) stopProcesses(processes []*process, grace time.Duration) {
+	var group sync.WaitGroup
+	for _, process := range processes {
+		group.Go(func() {
+			task.stopProcess(process, grace)
+		})
+	}
+	group.Wait()
 }
 
 func (task *Task) args() []string {

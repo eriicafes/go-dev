@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
@@ -32,7 +33,7 @@ func TestReloadSwapsOnlyAfterReplacementIsHealthy(t *testing.T) {
 		Plugins: Plugins(PluginFunc(func(task *Task) error {
 			onLive := func(pid int) { live <- pid }
 			task.OnStart(onLive)
-			task.OnReload(onLive)
+			task.OnReload(func(pid int, _ []string) { onLive(pid) })
 			return nil
 		})),
 	})
@@ -232,6 +233,46 @@ func TestCmdClosesChildTasks(t *testing.T) {
 	}
 }
 
+func TestTaskCloseWaitsForReplacedProcessCleanup(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "worker.go")
+	marker := filepath.Join(dir, "starts")
+	writeStubbornWorker(t, file)
+	binary := buildWatchCmd(t, dir, file)
+	cleaned := make(chan struct{}, 2)
+	server := newSession(t)
+	task, err := server.RunTask(Cmd{
+		Run: cleanupTarget{
+			Target:  Binary(binary),
+			cleaned: cleaned,
+		},
+		Args:        Values(marker),
+		Dir:         dir,
+		ServerAddr:  "127.0.0.1:0",
+		GracePeriod: 100 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForStart(t, marker, 1)
+	if err := task.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	waitForStart(t, marker, 2)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := task.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		select {
+		case <-cleaned:
+		default:
+			t.Fatal("Close returned before every process cleanup ran")
+		}
+	}
+}
+
 func TestReloadHookCanReload(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "app.go")
 	writeWorker(t, file)
@@ -241,7 +282,7 @@ func TestReloadHookCanReload(t *testing.T) {
 	task, err := server.RunTask(Cmd{
 		Run: Package(file),
 		Plugins: Plugins(PluginFunc(func(task *Task) error {
-			task.OnReload(func(int) {
+			task.OnReload(func(int, []string) {
 				once.Do(func() { reloadDone <- task.Reload() })
 			})
 			return nil
@@ -402,9 +443,11 @@ func TestWatchBuildsAndServesLatestSource(t *testing.T) {
 	file := filepath.Join(watchPath, "app.go")
 	writeGoApp(t, file, "one")
 	live := make(chan int, 2)
+	paths := make(chan []string, 1)
 	server := newSession(t)
 	task, err := server.RunTask(Cmd{
-		Watch:            Values(watchPath),
+		Dir:              watchPath,
+		Watch:            Values("."),
 		PollInterval:     10 * time.Millisecond,
 		ReloadDelay:      5 * time.Millisecond,
 		GracePeriod:      10 * time.Millisecond,
@@ -414,7 +457,10 @@ func TestWatchBuildsAndServesLatestSource(t *testing.T) {
 		Plugins: Plugins(PluginFunc(func(task *Task) error {
 			onLive := func(pid int) { live <- pid }
 			task.OnStart(onLive)
-			task.OnReload(onLive)
+			task.OnReload(func(pid int, changed []string) {
+				onLive(pid)
+				paths <- changed
+			})
 			return nil
 		})),
 	})
@@ -437,6 +483,9 @@ func TestWatchBuildsAndServesLatestSource(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("watch did not trigger a reload")
+	}
+	if got, want := <-paths, []string{"app.go"}; !slices.Equal(got, want) {
+		t.Fatalf("reload paths = %q, want %q", got, want)
 	}
 	assertBody(t, task.URL(), "two")
 }
@@ -520,6 +569,22 @@ func TestSnapshotExcludesTestFilesAndPaths(t *testing.T) {
 	}
 }
 
+func TestChangedPathsDedupesChanges(t *testing.T) {
+	left := map[string]fileState{
+		"changed": {size: 1},
+		"removed": {size: 1},
+	}
+	right := map[string]fileState{
+		"changed": {size: 2},
+		"added":   {size: 1},
+	}
+	got := changedPaths(left, right)
+	slices.Sort(got)
+	if want := []string{"added", "changed", "removed"}; !slices.Equal(got, want) {
+		t.Fatalf("changed paths = %q, want %q", got, want)
+	}
+}
+
 func TestEmptyCmdDirUsesCurrentDirectory(t *testing.T) {
 	want, err := os.Getwd()
 	if err != nil {
@@ -595,6 +660,22 @@ func TestCloseRejectsTaskThatFinishesStarting(t *testing.T) {
 type blockingTarget struct {
 	started chan<- struct{}
 	release <-chan struct{}
+}
+
+type cleanupTarget struct {
+	Target
+	cleaned chan<- struct{}
+}
+
+func (target cleanupTarget) Cmd(config Cmd) (*exec.Cmd, func(), error) {
+	command, cleanup, err := target.Target.Cmd(config)
+	if err != nil {
+		return nil, nil, err
+	}
+	return command, func() {
+		cleanup()
+		target.cleaned <- struct{}{}
+	}, nil
 }
 
 func (command blockingTarget) Cmd(Cmd) (*exec.Cmd, func(), error) {
@@ -689,6 +770,34 @@ func main() {
 	}
 }
 
+func writeStubbornWorker(t *testing.T, file string) {
+	t.Helper()
+	source := `package main
+import (
+    "os"
+    "os/signal"
+    "strconv"
+    "time"
+)
+func main() {
+    marker := os.Args[1]
+    count, _ := strconv.Atoi(string(must(os.ReadFile(marker))))
+    count++
+    _ = os.WriteFile(marker, []byte(strconv.Itoa(count)), 0o600)
+    if count == 1 {
+        signals := make(chan os.Signal, 1)
+        signal.Notify(signals, os.Interrupt)
+        <-signals
+    }
+    for { time.Sleep(time.Hour) }
+}
+func must(bytes []byte, err error) []byte { return bytes }
+`
+	if err := os.WriteFile(file, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func writeCommandServer(t *testing.T, file, message string) {
 	t.Helper()
 	source := `package main
@@ -733,6 +842,21 @@ func waitForPID(t *testing.T, path string, previous int) int {
 	}
 	t.Fatalf("timed out waiting for command pid different from %d", previous)
 	return 0
+}
+
+func waitForStart(t *testing.T, path string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		contents, err := os.ReadFile(path)
+		if err == nil {
+			if got, err := strconv.Atoi(string(contents)); err == nil && got >= want {
+				return
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d process starts", want)
 }
 
 func assertBody(t *testing.T, endpoint, want string) {

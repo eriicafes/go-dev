@@ -3,6 +3,7 @@ package dev
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -12,13 +13,13 @@ var alwaysExcludedPaths = []string{".git", "node_modules"}
 
 type watcher struct {
 	cmd     *Cmd
-	reload  func() error
+	reload  func([]string) error
 	stop    chan struct{}
 	done    chan struct{}
 	started atomic.Bool
 }
 
-func newWatcher(cmd *Cmd, reload func() error) *watcher {
+func newWatcher(cmd *Cmd, reload func([]string) error) *watcher {
 	return &watcher{cmd: cmd, reload: reload, stop: make(chan struct{}), done: make(chan struct{})}
 }
 
@@ -40,24 +41,57 @@ func (w *watcher) watch() {
 	previous := takeSnapshot(w.cmd.Watch, w.cmd.WatchExclude)
 	ticker := time.NewTicker(w.cmd.PollInterval)
 	defer ticker.Stop()
+	var changed map[string]struct{}
+	var timer *time.Timer
+	var reload <-chan time.Time
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
 	for {
 		select {
 		case <-w.stop:
 			return
 		case <-ticker.C:
 			next := takeSnapshot(w.cmd.Watch, w.cmd.WatchExclude)
-			if snapshotsEqual(previous, next) {
+			paths := changedPaths(previous, next)
+			if len(paths) == 0 {
 				continue
 			}
 			previous = next
-			timer := time.NewTimer(w.cmd.ReloadDelay)
-			select {
-			case <-w.stop:
-				timer.Stop()
-				return
-			case <-timer.C:
-				_ = w.reload()
+			if changed == nil {
+				changed = make(map[string]struct{})
 			}
+			for _, path := range paths {
+				changed[path] = struct{}{}
+			}
+			if timer == nil {
+				timer = time.NewTimer(w.cmd.ReloadDelay)
+				reload = timer.C
+			} else {
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(w.cmd.ReloadDelay)
+			}
+		case <-reload:
+			reload = nil
+			timer = nil
+			paths := make([]string, 0, len(changed))
+			for path := range changed {
+				relative, err := filepath.Rel(w.cmd.Dir, path)
+				if err == nil {
+					path = relative
+				}
+				paths = append(paths, path)
+			}
+			slices.Sort(paths)
+			changed = nil
+			_ = w.reload(paths)
 		}
 	}
 }
@@ -96,16 +130,23 @@ func takeSnapshot(paths, excludes []string) map[string]fileState {
 	return states
 }
 
-func snapshotsEqual(left, right map[string]fileState) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for name, state := range left {
-		if right[name] != state {
-			return false
+func changedPaths(left, right map[string]fileState) []string {
+	changed := make(map[string]struct{})
+	for path, state := range left {
+		if right[path] != state {
+			changed[path] = struct{}{}
 		}
 	}
-	return true
+	for path, state := range right {
+		if left[path] != state {
+			changed[path] = struct{}{}
+		}
+	}
+	paths := make([]string, 0, len(changed))
+	for path := range changed {
+		paths = append(paths, path)
+	}
+	return paths
 }
 
 func isExcludedPath(path string, excludes []string) bool {

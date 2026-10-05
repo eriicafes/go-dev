@@ -201,30 +201,29 @@ Plugins configure a task before its first process starts. Use
 ```go
 Plugins: dev.Plugins(
 	dev.PluginFunc(func(task *dev.Task) error {
-		onLive := func(pid int) {
-			log.Printf("process %d is live", pid)
-		}
-		task.OnStart(onLive)
-		task.OnReload(func(pid int) {
-			onLive(pid)
+		task.OnStart(func(pid int) {
+			log.Printf("process %d started", pid)
+		})
+		task.OnReload(func(pid int, paths []string) {
+			log.Printf("process %d reloaded after %v", pid, paths)
 		})
 		return nil
 	}),
 ),
 ```
 
-### Vite HMR
+### Vite refresh
 
-`github.com/eriicafes/go-dev/vite` listens to an already running Vite
-development server. Vite `update` and `full-reload` messages call
-`Task.Reload`, so the Go application is replaced when frontend changes arrive.
+Use the Vite refresh plugin to trigger a page refresh on reload events.
+`Refresh.Origin` defaults to `http://localhost:5173`.
+A nil or empty `Refresh.Watch` matches every reload event.
 
 ```go
 import "github.com/eriicafes/go-dev/vite"
 
 api, err := session.RunTask(dev.Cmd{
 	Run:              dev.Package("."),
-	Watch:            dev.Values("."),
+	Watch:            dev.Values("templates"),
 	ServerAddr:       ":8000",
 	ServerHealthPath: "/health",
 	Commands: dev.Commands(
@@ -235,7 +234,7 @@ api, err := session.RunTask(dev.Cmd{
 		},
 	),
 	Plugins: dev.Plugins(
-		vite.HMR(vite.Config{Origin: "http://127.0.0.1:5173"}),
+		vite.Refresh{},
 	),
 })
 session.Catch(err)
@@ -243,9 +242,28 @@ session.Catch(err)
 log.Printf("API listening on %s", api.URL())
 ```
 
-`Origin` defaults to `http://127.0.0.1:5173`. Set `vite.Config.URL` to a full
-`ws://` or `wss://` URL when Vite uses a custom WebSocket host, port, path, or
-token.
+Vite needs a server-side plugin that handles the POST and broadcasts its
+full-reload message:
+
+```ts
+import type { Plugin } from "vite";
+
+export function goDevRefresh(): Plugin {
+  return {
+    name: "go-dev-refresh",
+    configureServer(server) {
+      server.middlewares.use("/__go-dev/refresh", (request, response, next) => {
+        if (request.method !== "POST") return next();
+        server.ws.send({ type: "full-reload" });
+        response.statusCode = 204;
+        response.end();
+      });
+    },
+  };
+}
+```
+
+Add `goDevRefresh()` to `vite.config.ts` plugins.
 
 ## Lifecycle and shutdown
 
@@ -285,7 +303,8 @@ receives that process's PID.
 #### `Task.OnReload`
 
 OnReload runs asynchronously after each replacement process becomes live. It
-receives that process's PID.
+receives that process's PID and the deduped watched paths that caused it,
+relative to `Cmd.Dir`. Explicit reloads provide no paths.
 
 #### `Task.OnProcessExit`
 
