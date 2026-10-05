@@ -25,7 +25,7 @@ import (
 func main() {
 	session := dev.New()
 	task, err := session.RunTask(dev.Cmd{
-		Dir:        dev.Dir("..", ".."),
+		Dir:        dev.Dir("../.."),
 		Run:        dev.Package("./cmd/app"),
 		Watch:      dev.Values("."),
 
@@ -100,14 +100,21 @@ entrypoint are forwarded as well. `Env` adds environment variables to every
 process. `BuildEnv` adds environment variables to `dev.Package` builds.
 
 ```go
-Args: dev.Values("-log-level=debug"),
-Env: dev.Values(
-	dev.Pair("LOG_LEVEL", "debug"),
-	dev.Pair("FEATURE_X", "1"),
-),
-BuildEnv: dev.Values(
-	dev.Pair("CGO_ENABLED", "1"),
-),
+err := session.Run(dev.Cmd{
+	Run: dev.Package("./cmd/api"),
+	Args: dev.Values(
+		"-log-level=debug",
+		dev.Pair("-log-format", "json"),
+	),
+	Env: dev.Values(
+		"APP_ENV=development",
+		dev.Pair("LOG_LEVEL", "debug"),
+	),
+	BuildEnv: dev.Values(
+		"CGO_ENABLED=1",
+	),
+})
+session.Catch(err)
 ```
 
 Both processes start with the operating-system environment. `dev.Values` makes
@@ -127,18 +134,22 @@ directory resolves from the parent's `Dir`. A child stops when its parent task
 or the development session closes.
 
 ```go
-Commands: dev.Commands(
-	dev.Cmd{
-		Run:   dev.Binary("pnpm"),
-		Args:  dev.Values("dev"),
-		Phase: dev.Before,
-	},
-	dev.Cmd{
-		Run:   dev.Binary("go"),
-		Args:  dev.Values("run", "./cmd/worker"),
-		Phase: dev.After,
-	},
-),
+err := session.Run(dev.Cmd{
+	Run: dev.Package("./cmd/api"),
+	Commands: dev.Commands(
+		dev.Cmd{
+			Run:   dev.Binary("pnpm"),
+			Args:  dev.Values("dev"),
+			Phase: dev.Before,
+		},
+		dev.Cmd{
+			Run:   dev.Binary("go"),
+			Args:  dev.Values("run", "./cmd/worker"),
+			Phase: dev.After,
+		},
+	),
+})
+session.Catch(err)
 ```
 
 `dev.Before` starts a command before plugins and the parent's first process.
