@@ -122,9 +122,12 @@ slices concise. `dev.Pair` joins two values with an equals sign.
 
 ### Watching and timing
 
-`Watch` lists files or directories to poll. The default polling interval is
-250ms. A detected change waits for `ReloadDelay`, which defaults to 100ms, so
-nearby edits are coalesced. `GracePeriod` defaults to 5 seconds.
+`Watch` lists files or directories to poll. Changes to `*_test.go` files and
+paths named `.git` or `node_modules` are ignored by default. `WatchExclude`
+omits additional files or directories and supports `filepath.Match` patterns.
+The default polling interval is 250ms. A detected change waits for
+`ReloadDelay`, which defaults to 100ms, so nearby edits are coalesced.
+`GracePeriod` defaults to 5 seconds.
 
 ## Commands
 

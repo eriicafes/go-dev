@@ -3,9 +3,12 @@ package dev
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 )
+
+var alwaysExcludedPaths = []string{".git", "node_modules"}
 
 type watcher struct {
 	cmd     *Cmd
@@ -34,7 +37,7 @@ func (w *watcher) close() {
 
 func (w *watcher) watch() {
 	defer close(w.done)
-	previous := takeSnapshot(w.cmd.Watch)
+	previous := takeSnapshot(w.cmd.Watch, w.cmd.WatchExclude)
 	ticker := time.NewTicker(w.cmd.PollInterval)
 	defer ticker.Stop()
 	for {
@@ -42,7 +45,7 @@ func (w *watcher) watch() {
 		case <-w.stop:
 			return
 		case <-ticker.C:
-			next := takeSnapshot(w.cmd.Watch)
+			next := takeSnapshot(w.cmd.Watch, w.cmd.WatchExclude)
 			if snapshotsEqual(previous, next) {
 				continue
 			}
@@ -64,14 +67,26 @@ type fileState struct {
 	modTime time.Time
 }
 
-func takeSnapshot(paths []string) map[string]fileState {
+func takeSnapshot(paths, excludes []string) map[string]fileState {
 	states := make(map[string]fileState)
 	for _, path := range paths {
 		_ = filepath.Walk(path, func(name string, info os.FileInfo, err error) error {
-			if err != nil || info.IsDir() {
-				if info != nil && info.IsDir() && (info.Name() == ".git" || info.Name() == "node_modules") {
+			if err != nil {
+				return nil
+			}
+			if isExcludedPath(name, excludes) {
+				if info.IsDir() {
 					return filepath.SkipDir
 				}
+				return nil
+			}
+			if info.IsDir() {
+				if isExcludedPath(info.Name(), alwaysExcludedPaths) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if strings.HasSuffix(info.Name(), "_test.go") {
 				return nil
 			}
 			states[name] = fileState{size: info.Size(), modTime: info.ModTime()}
@@ -91,4 +106,26 @@ func snapshotsEqual(left, right map[string]fileState) bool {
 		}
 	}
 	return true
+}
+
+func isExcludedPath(path string, excludes []string) bool {
+	for _, exclude := range excludes {
+		if path == exclude || strings.HasPrefix(path, exclude+string(filepath.Separator)) {
+			return true
+		}
+		if matches, _ := filepath.Match(exclude, path); matches {
+			return true
+		}
+	}
+	return false
+}
+
+func resolvePaths(dir string, paths []string) []string {
+	resolved := append([]string(nil), paths...)
+	for index, path := range resolved {
+		if !filepath.IsAbs(path) {
+			resolved[index] = filepath.Join(dir, path)
+		}
+	}
+	return resolved
 }

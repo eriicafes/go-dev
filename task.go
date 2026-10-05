@@ -131,13 +131,8 @@ func (task *Task) normalizeCmd() error {
 		return fmt.Errorf("dev: resolve directory %q: %w", task.cmd.Dir, err)
 	}
 	task.cmd.Dir = dir
-	watch := append([]string(nil), task.cmd.Watch...)
-	for index, path := range watch {
-		if !filepath.IsAbs(path) {
-			watch[index] = filepath.Join(dir, path)
-		}
-	}
-	task.cmd.Watch = watch
+	task.cmd.Watch = resolvePaths(dir, task.cmd.Watch)
+	task.cmd.WatchExclude = resolvePaths(dir, task.cmd.WatchExclude)
 	if task.cmd.ServerAddr != "" && task.cmd.ServerHealthPath != "" && task.cmd.ServerHealthTimeout <= 0 {
 		task.cmd.ServerHealthTimeout = 30 * time.Second
 	}

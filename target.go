@@ -80,6 +80,9 @@ type Cmd struct {
 	// Watch reloads the command when one of its paths changes. Relative paths
 	// resolve from Dir.
 	Watch []string
+	// WatchExclude omits files, directories, or filepath.Match patterns from
+	// Watch. Relative paths resolve from Dir.
+	WatchExclude []string
 
 	// ServerAddr enables a stable HTTP proxy. When empty, the command runs
 	// without a proxy or readiness checks.

@@ -387,7 +387,12 @@ func TestDirResolvesFromCaller(t *testing.T) {
 
 func TestCmdDirResolvesWatchPaths(t *testing.T) {
 	dir := t.TempDir()
-	task := &Task{cmd: Cmd{Run: Binary("app"), Dir: dir, Watch: Values("app", filepath.Join(dir, "absolute"))}}
+	task := &Task{cmd: Cmd{
+		Run:          Binary("app"),
+		Dir:          dir,
+		Watch:        Values("app", filepath.Join(dir, "absolute")),
+		WatchExclude: Values("generated", "*.generated.go", filepath.Join(dir, "vendor")),
+	}}
 	if err := task.normalizeCmd(); err != nil {
 		t.Fatal(err)
 	}
@@ -396,6 +401,45 @@ func TestCmdDirResolvesWatchPaths(t *testing.T) {
 	}
 	if got, want := task.cmd.Watch[1], filepath.Join(dir, "absolute"); got != want {
 		t.Fatalf("absolute watch path = %q, want %q", got, want)
+	}
+	if got, want := task.cmd.WatchExclude[0], filepath.Join(dir, "generated"); got != want {
+		t.Fatalf("relative exclude path = %q, want %q", got, want)
+	}
+	if got, want := task.cmd.WatchExclude[1], filepath.Join(dir, "*.generated.go"); got != want {
+		t.Fatalf("relative exclude pattern = %q, want %q", got, want)
+	}
+	if got, want := task.cmd.WatchExclude[2], filepath.Join(dir, "vendor"); got != want {
+		t.Fatalf("absolute exclude path = %q, want %q", got, want)
+	}
+}
+
+func TestSnapshotExcludesTestFilesAndPaths(t *testing.T) {
+	dir := t.TempDir()
+	keep := filepath.Join(dir, "app.go")
+	testFile := filepath.Join(dir, "app_test.go")
+	globbed := filepath.Join(dir, "app.generated.go")
+	excluded := filepath.Join(dir, "generated")
+	if err := os.WriteFile(keep, []byte("app"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(testFile, []byte("test"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(globbed, []byte("generated"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(excluded, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(excluded, "app.go"), []byte("generated"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	states := takeSnapshot(Values(dir), Values(excluded, filepath.Join(dir, "*.generated.go")))
+	if len(states) != 1 {
+		t.Fatalf("snapshot files = %d, want 1", len(states))
+	}
+	if _, ok := states[keep]; !ok {
+		t.Fatalf("snapshot did not include %q", keep)
 	}
 }
 
