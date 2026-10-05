@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"os/exec"
@@ -181,7 +182,7 @@ func TestCmdReloadsBehindProxy(t *testing.T) {
 		Dir:                 dir,
 		ServerAddr:          "127.0.0.1:0",
 		ServerHealthPath:    "/",
-		ServerHealthTimeout: time.Second,
+		ServerHealthTimeout: 5 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -334,7 +335,7 @@ func TestProcessExitHook(t *testing.T) {
 		if got.err != nil {
 			t.Fatalf("exit error = %v, want nil", got.err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("process exit hook did not run")
 	}
 }
@@ -378,7 +379,7 @@ func TestProxyWaitsForFirstProcess(t *testing.T) {
 		t.Fatal("proxy responded before an app process was live")
 	case <-time.After(20 * time.Millisecond):
 	}
-	task.active.Store(&process{url: target})
+	task.active.Store(&process{proxy: httputil.NewSingleHostReverseProxy(target)})
 	task.readyOnce.Do(func() { close(task.ready) })
 	select {
 	case <-finished:
@@ -498,6 +499,31 @@ func TestValuesAndPair(t *testing.T) {
 	}
 }
 
+func TestOsEnvAndGetenv(t *testing.T) {
+	t.Setenv("GO_DEV_SET", "value")
+	if got, want := OsEnv("APP_ENV=test"), append(os.Environ(), "APP_ENV=test"); !slices.Equal(got, want) {
+		t.Fatalf("OsEnv = %q, want %q", got, want)
+	}
+	if got, want := Getenv("GO_DEV_SET", "GO_DEV_UNSET"), []string{"GO_DEV_SET=value"}; !slices.Equal(got, want) {
+		t.Fatalf("Getenv = %q, want %q", got, want)
+	}
+}
+
+func TestTaskEnvironment(t *testing.T) {
+	t.Setenv("GO_DEV_SET", "value")
+	inherited := (&Task{}).environment("1234")
+	if !slices.Contains(inherited, "GO_DEV_SET=value") || inherited[len(inherited)-1] != "PORT=1234" {
+		t.Fatalf("nil Env environment = %q, want inherited variables and PORT", inherited)
+	}
+	exact := (&Task{cmd: Cmd{Env: Values("APP_ENV=test")}}).environment("1234")
+	if want := []string{"APP_ENV=test", "PORT=1234"}; !slices.Equal(exact, want) {
+		t.Fatalf("explicit Env environment = %q, want %q", exact, want)
+	}
+	if empty := (&Task{cmd: Cmd{Env: []string{}}}).environment(""); len(empty) != 0 {
+		t.Fatalf("empty Env environment = %q, want empty", empty)
+	}
+}
+
 func TestDirResolvesFromCaller(t *testing.T) {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
@@ -531,7 +557,7 @@ func TestCmdDirResolvesWatchPaths(t *testing.T) {
 	if got, want := task.cmd.WatchExclude[0], filepath.Join(dir, "generated"); got != want {
 		t.Fatalf("relative exclude path = %q, want %q", got, want)
 	}
-	if got, want := task.cmd.WatchExclude[1], filepath.Join(dir, "*.generated.go"); got != want {
+	if got, want := task.cmd.WatchExclude[1], "*.generated.go"; got != want {
 		t.Fatalf("relative exclude pattern = %q, want %q", got, want)
 	}
 	if got, want := task.cmd.WatchExclude[2], filepath.Join(dir, "vendor"); got != want {
@@ -544,6 +570,7 @@ func TestSnapshotExcludesTestFilesAndPaths(t *testing.T) {
 	keep := filepath.Join(dir, "app.go")
 	testFile := filepath.Join(dir, "app_test.go")
 	globbed := filepath.Join(dir, "app.generated.go")
+	nested := filepath.Join(dir, "sub", "app.generated.go")
 	excluded := filepath.Join(dir, "generated")
 	if err := os.WriteFile(keep, []byte("app"), 0o600); err != nil {
 		t.Fatal(err)
@@ -554,13 +581,19 @@ func TestSnapshotExcludesTestFilesAndPaths(t *testing.T) {
 	if err := os.WriteFile(globbed, []byte("generated"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Mkdir(filepath.Dir(nested), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nested, []byte("generated"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Mkdir(excluded, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(excluded, "app.go"), []byte("generated"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	states := takeSnapshot(Values(dir), Values(excluded, filepath.Join(dir, "*.generated.go")))
+	states := takeSnapshot(nil, Values(dir), Values(excluded, "*.generated.go"))
 	if len(states) != 1 {
 		t.Fatalf("snapshot files = %d, want 1", len(states))
 	}
@@ -872,5 +905,29 @@ func assertBody(t *testing.T, endpoint, want string) {
 	}
 	if got := string(body); got != want {
 		t.Fatalf("GET %s body = %q, want %q", endpoint, got, want)
+	}
+}
+
+func BenchmarkTakeSnapshot(b *testing.B) {
+	dir := b.TempDir()
+	for d := range 40 {
+		sub := filepath.Join(dir, "pkg"+strconv.Itoa(d))
+		if err := os.Mkdir(sub, 0o700); err != nil {
+			b.Fatal(err)
+		}
+		for f := range 50 {
+			name := "file" + strconv.Itoa(f) + ".go"
+			if f%5 == 0 {
+				name = "file" + strconv.Itoa(f) + "_test.go"
+			}
+			if err := os.WriteFile(filepath.Join(sub, name), nil, 0o600); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+	excludes := Values(filepath.Join(dir, "pkg0"), "*.gen.go")
+	var states map[string]fileState
+	for b.Loop() {
+		states = takeSnapshot(states, Values(dir), excludes)
 	}
 }

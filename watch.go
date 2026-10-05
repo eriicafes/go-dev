@@ -1,6 +1,9 @@
 package dev
 
 import (
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -38,7 +41,9 @@ func (w *watcher) close() {
 
 func (w *watcher) watch() {
 	defer close(w.done)
-	previous := takeSnapshot(w.cmd.Watch, w.cmd.WatchExclude)
+	// Alternate between two snapshots to avoid reallocating them every poll.
+	previous := takeSnapshot(nil, w.cmd.Watch, w.cmd.WatchExclude)
+	var next map[string]fileState
 	ticker := time.NewTicker(w.cmd.PollInterval)
 	defer ticker.Stop()
 	var changed map[string]struct{}
@@ -54,12 +59,12 @@ func (w *watcher) watch() {
 		case <-w.stop:
 			return
 		case <-ticker.C:
-			next := takeSnapshot(w.cmd.Watch, w.cmd.WatchExclude)
+			next = takeSnapshot(next, w.cmd.Watch, w.cmd.WatchExclude)
 			paths := changedPaths(previous, next)
 			if len(paths) == 0 {
 				continue
 			}
-			previous = next
+			previous, next = next, previous
 			if changed == nil {
 				changed = make(map[string]struct{})
 			}
@@ -91,7 +96,9 @@ func (w *watcher) watch() {
 			}
 			slices.Sort(paths)
 			changed = nil
-			_ = w.reload(paths)
+			if err := w.reload(paths); err != nil && !errors.Is(err, errTaskClosing) {
+				fmt.Fprintf(os.Stderr, "dev: reload: %v\n", err)
+			}
 		}
 	}
 }
@@ -101,26 +108,35 @@ type fileState struct {
 	modTime time.Time
 }
 
-func takeSnapshot(paths, excludes []string) map[string]fileState {
-	states := make(map[string]fileState)
+// takeSnapshot records the watched files in states, which it clears first and
+// allocates when nil. Paths are filtered by name before they are stat'ed.
+func takeSnapshot(states map[string]fileState, paths, excludes []string) map[string]fileState {
+	if states == nil {
+		states = make(map[string]fileState)
+	}
+	clear(states)
 	for _, path := range paths {
-		_ = filepath.Walk(path, func(name string, info os.FileInfo, err error) error {
+		_ = filepath.WalkDir(path, func(name string, entry fs.DirEntry, err error) error {
 			if err != nil {
 				return nil
 			}
 			if isExcludedPath(name, excludes) {
-				if info.IsDir() {
+				if entry.IsDir() {
 					return filepath.SkipDir
 				}
 				return nil
 			}
-			if info.IsDir() {
-				if isExcludedPath(info.Name(), alwaysExcludedPaths) {
+			if entry.IsDir() {
+				if isExcludedPath(entry.Name(), alwaysExcludedPaths) {
 					return filepath.SkipDir
 				}
 				return nil
 			}
-			if strings.HasSuffix(info.Name(), "_test.go") {
+			if strings.HasSuffix(entry.Name(), "_test.go") {
+				return nil
+			}
+			info, err := entry.Info()
+			if err != nil {
 				return nil
 			}
 			states[name] = fileState{size: info.Size(), modTime: info.ModTime()}
@@ -131,20 +147,16 @@ func takeSnapshot(paths, excludes []string) map[string]fileState {
 }
 
 func changedPaths(left, right map[string]fileState) []string {
-	changed := make(map[string]struct{})
+	var paths []string
 	for path, state := range left {
-		if right[path] != state {
-			changed[path] = struct{}{}
+		if next, ok := right[path]; !ok || next != state {
+			paths = append(paths, path)
 		}
 	}
-	for path, state := range right {
-		if left[path] != state {
-			changed[path] = struct{}{}
+	for path := range right {
+		if _, ok := left[path]; !ok {
+			paths = append(paths, path)
 		}
-	}
-	paths := make([]string, 0, len(changed))
-	for path := range changed {
-		paths = append(paths, path)
 	}
 	return paths
 }
@@ -157,8 +169,30 @@ func isExcludedPath(path string, excludes []string) bool {
 		if matches, _ := filepath.Match(exclude, path); matches {
 			return true
 		}
+		// Patterns without a separator match names at any depth.
+		if isBasePattern(exclude) {
+			if matches, _ := filepath.Match(exclude, filepath.Base(path)); matches {
+				return true
+			}
+		}
 	}
 	return false
+}
+
+func isBasePattern(pattern string) bool {
+	return strings.ContainsAny(pattern, "*?[") && !strings.ContainsAny(pattern, "/"+string(filepath.Separator))
+}
+
+// resolveExcludes resolves exclusions like resolvePaths but keeps patterns
+// without a separator, which match names at any depth.
+func resolveExcludes(dir string, excludes []string) []string {
+	resolved := resolvePaths(dir, excludes)
+	for index, exclude := range excludes {
+		if isBasePattern(exclude) {
+			resolved[index] = exclude
+		}
+	}
+	return resolved
 }
 
 func resolvePaths(dir string, paths []string) []string {

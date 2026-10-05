@@ -18,6 +18,8 @@ import (
 	"time"
 )
 
+var errTaskClosing = errors.New("dev: task is closing")
+
 // Task controls a Cmd started by the Session. Tasks can reload.
 // Tasks with ServerAddr also expose a stable proxy URL.
 type Task struct {
@@ -38,14 +40,17 @@ type Task struct {
 	closeHooks  []func()
 	middlewares []Middleware
 
-	children []*Task
+	childrenMu sync.Mutex
+	children   []*Task
 
 	closeOnce sync.Once
 	readyOnce sync.Once
 	closing   atomic.Bool
+	forced    atomic.Bool
 	exitErr   error
 	done      chan struct{}
 	ready     chan struct{}
+	started   chan struct{}
 	stopping  chan struct{}
 	watcher   *watcher
 }
@@ -53,7 +58,7 @@ type Task struct {
 type process struct {
 	command *exec.Cmd
 	done    chan struct{}
-	url     *url.URL
+	proxy   *httputil.ReverseProxy
 	cleanup func()
 }
 
@@ -63,6 +68,7 @@ func newTask(session *Session, cmd Cmd) (*Task, error) {
 		cmd:       cmd,
 		done:      make(chan struct{}),
 		ready:     make(chan struct{}),
+		started:   make(chan struct{}),
 		stopping:  make(chan struct{}),
 		processes: make(map[*process]struct{}),
 	}
@@ -97,7 +103,8 @@ func (task *Task) URL() string {
 }
 
 // Use adds middleware around a task's stable proxy. It applies when the task
-// configures ServerAddr.
+// configures ServerAddr and must be called from a Plugin, before the proxy
+// starts.
 func (task *Task) Use(middleware Middleware) {
 	if task.cmd.ServerAddr != "" && middleware != nil {
 		task.middlewares = append(task.middlewares, middleware)
@@ -175,7 +182,7 @@ func (task *Task) normalizeCmd() error {
 	}
 	task.cmd.Dir = dir
 	task.cmd.Watch = resolvePaths(dir, task.cmd.Watch)
-	task.cmd.WatchExclude = resolvePaths(dir, task.cmd.WatchExclude)
+	task.cmd.WatchExclude = resolveExcludes(dir, task.cmd.WatchExclude)
 	if task.cmd.ServerAddr != "" && task.cmd.ServerHealthPath != "" && task.cmd.ServerHealthTimeout <= 0 {
 		task.cmd.ServerHealthTimeout = 30 * time.Second
 	}
@@ -192,6 +199,8 @@ func (task *Task) normalizeCmd() error {
 }
 
 func (task *Task) start() error {
+	// An early process exit waits for start to finish before closing the task.
+	defer close(task.started)
 	if err := task.normalizeCmd(); err != nil {
 		return err
 	}
@@ -273,7 +282,14 @@ func (task *Task) startChild(config Cmd) error {
 		return err
 	}
 	// Register the child before it starts so parent shutdown always includes it.
+	task.childrenMu.Lock()
+	if task.closing.Load() {
+		task.childrenMu.Unlock()
+		_ = child.Close(context.Background())
+		return errTaskClosing
+	}
 	task.children = append(task.children, child)
+	task.childrenMu.Unlock()
 	if err := child.start(); err != nil {
 		// A partially started child still owns resources that must be released.
 		_ = child.Close(context.Background())
@@ -295,15 +311,24 @@ func (task *Task) Close(ctx context.Context) error {
 		task.reloadMu.Lock()
 		defer task.reloadMu.Unlock()
 		close(task.stopping)
-		// Stop accepting proxy requests before draining the active process.
+		// Stop accepting proxy requests, then drain processes while in-flight
+		// requests finish. Long-lived requests end when their process stops.
+		var shutdown chan error
 		if task.http != nil {
-			result = task.http.Shutdown(ctx)
+			shutdown = make(chan error, 1)
+			go func() { shutdown <- task.http.Shutdown(ctx) }()
 		} else if task.listener != nil {
 			result = task.listener.Close()
 		}
 		task.stopProcesses(task.snapshotProcesses(), task.cmd.GracePeriod)
+		if shutdown != nil {
+			result = <-shutdown
+		}
 		// Children share this task's lifetime.
-		for _, child := range task.children {
+		task.childrenMu.Lock()
+		children := slices.Clone(task.children)
+		task.childrenMu.Unlock()
+		for _, child := range children {
 			result = errors.Join(result, child.Close(ctx))
 		}
 		task.hooksMu.Lock()
@@ -327,14 +352,21 @@ func (task *Task) reload(paths []string) error {
 	task.reloadMu.Lock()
 	if task.closing.Load() {
 		task.reloadMu.Unlock()
-		return errors.New("dev: task is closing")
+		return errTaskClosing
 	}
 	previous := task.active.Load()
+	// Prepare the replacement first so a failed build keeps the old process.
+	// The target may create a temporary build artifact with matching cleanup.
+	command, cleanup, err := task.cmd.Run.Cmd(task.cmd)
+	if err != nil {
+		task.reloadMu.Unlock()
+		return err
+	}
 	if previous != nil && task.cmd.ServerAddr == "" {
 		// Without a proxy, the old process cannot coexist with its replacement.
 		task.stopProcess(previous, task.cmd.GracePeriod)
 	}
-	next, err := task.startProcess(task.session.ctx)
+	next, err := task.startProcess(task.session.ctx, command, cleanup)
 	if err != nil {
 		task.reloadMu.Unlock()
 		return err
@@ -366,12 +398,7 @@ func (task *Task) reload(paths []string) error {
 	return nil
 }
 
-func (task *Task) startProcess(ctx context.Context) (*process, error) {
-	// The target may create a temporary build artifact with matching cleanup.
-	command, cleanup, err := task.cmd.Run.Cmd(task.cmd)
-	if err != nil {
-		return nil, err
-	}
+func (task *Task) startProcess(ctx context.Context, command *exec.Cmd, cleanup func()) (*process, error) {
 	port := ""
 	var target *url.URL
 	if task.cmd.ServerAddr != "" {
@@ -384,7 +411,7 @@ func (task *Task) startProcess(ctx context.Context) (*process, error) {
 		target, _ = url.Parse("http://" + addr)
 		_, port, _ = net.SplitHostPort(addr)
 	}
-	command.Args = append(command.Args, task.args()...)
+	command.Args = append(command.Args, task.cmd.Args...)
 	command.Dir = task.cmd.Dir
 	command.Env = task.environment(port)
 	command.Stdout = os.Stdout
@@ -394,7 +421,13 @@ func (task *Task) startProcess(ctx context.Context) (*process, error) {
 		cleanup()
 		return nil, fmt.Errorf("dev: start process: %w", err)
 	}
-	process := &process{command: command, done: make(chan struct{}), url: target, cleanup: cleanup}
+	process := &process{command: command, done: make(chan struct{}), cleanup: cleanup}
+	if target != nil {
+		process.proxy = httputil.NewSingleHostReverseProxy(target)
+		process.proxy.ErrorHandler = func(writer http.ResponseWriter, _ *http.Request, err error) {
+			http.Error(writer, "server unavailable: "+err.Error(), http.StatusBadGateway)
+		}
+	}
 	task.processesMu.Lock()
 	task.processes[process] = struct{}{}
 	task.processesMu.Unlock()
@@ -402,7 +435,7 @@ func (task *Task) startProcess(ctx context.Context) (*process, error) {
 	go task.waitProcess(process)
 	if task.cmd.ServerAddr != "" && task.cmd.ServerHealthPath != "" {
 		// Keep this process private until it reports readiness.
-		if err := task.waitForHealth(ctx, process); err != nil {
+		if err := task.waitForHealth(ctx, process, target); err != nil {
 			task.stopProcess(process, 0)
 			return nil, fmt.Errorf("dev: process did not become healthy: %w", err)
 		}
@@ -433,12 +466,15 @@ func (task *Task) waitProcess(process *process) {
 	}
 	task.reloadMu.Unlock()
 	if current && !closing && !watching {
-		// Close the completed unwatched task.
-		go func() { _ = task.Close(context.Background()) }()
+		// Close the completed unwatched task once start has registered children.
+		go func() {
+			<-task.started
+			_ = task.Close(context.Background())
+		}()
 	}
 }
 
-func (task *Task) waitForHealth(ctx context.Context, process *process) error {
+func (task *Task) waitForHealth(ctx context.Context, process *process, target *url.URL) error {
 	deadline := time.NewTimer(task.cmd.ServerHealthTimeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(50 * time.Millisecond)
@@ -447,7 +483,7 @@ func (task *Task) waitForHealth(ctx context.Context, process *process) error {
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
-	endpoint := *process.url
+	endpoint := *target
 	endpoint.Path = path
 	client := &http.Client{Timeout: 500 * time.Millisecond}
 	for {
@@ -476,11 +512,7 @@ func (task *Task) serveHTTP(writer http.ResponseWriter, request *http.Request) {
 	for {
 		current := task.active.Load()
 		if current != nil {
-			proxy := httputil.NewSingleHostReverseProxy(current.url)
-			proxy.ErrorHandler = func(writer http.ResponseWriter, _ *http.Request, err error) {
-				http.Error(writer, "server unavailable: "+err.Error(), http.StatusBadGateway)
-			}
-			proxy.ServeHTTP(writer, request)
+			current.proxy.ServeHTTP(writer, request)
 			return
 		}
 		select {
@@ -501,7 +533,7 @@ func (task *Task) stopProcess(process *process, grace time.Duration) {
 	default:
 	}
 	_ = interruptProcess(process.command)
-	if grace <= 0 {
+	if grace <= 0 || task.forced.Load() {
 		_ = killProcess(process.command)
 		<-process.done
 		return
@@ -513,6 +545,25 @@ func (task *Task) stopProcess(process *process, grace time.Duration) {
 	case <-timer.C:
 		_ = killProcess(process.command)
 		<-process.done
+	}
+}
+
+// kill immediately stops every process of the task and its children. Processes
+// stopped later skip their grace period.
+func (task *Task) kill() {
+	task.forced.Store(true)
+	for _, process := range task.snapshotProcesses() {
+		select {
+		case <-process.done:
+		default:
+			_ = killProcess(process.command)
+		}
+	}
+	task.childrenMu.Lock()
+	children := slices.Clone(task.children)
+	task.childrenMu.Unlock()
+	for _, child := range children {
+		child.kill()
 	}
 }
 
@@ -536,14 +587,12 @@ func (task *Task) stopProcesses(processes []*process, grace time.Duration) {
 	group.Wait()
 }
 
-func (task *Task) args() []string {
-	args := append([]string(nil), task.cmd.Args...)
-	args = append(args, os.Args[1:]...)
-	return args
-}
-
 func (task *Task) environment(port string) []string {
-	env := append(os.Environ(), task.cmd.Env...)
+	// A nil Env inherits the operating-system environment, like exec.Cmd.
+	env := slices.Clone(task.cmd.Env)
+	if env == nil {
+		env = os.Environ()
+	}
 	if port != "" {
 		env = append(env, "PORT="+port)
 	}

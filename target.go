@@ -74,9 +74,11 @@ type Cmd struct {
 
 	// Args supplies command-line arguments to every process.
 	Args []string
-	// Env adds environment variables to every process.
+	// Env is the environment of every process. When nil, processes inherit the
+	// operating-system environment. Use OsEnv to inherit it with additions.
 	Env []string
-	// BuildEnv adds environment variables to a Package build.
+	// BuildEnv adds environment variables to the inherited environment of a
+	// Package build.
 	BuildEnv []string
 	// Dir is the working directory. For child commands, relative paths resolve
 	// from the parent command's Dir; otherwise they resolve from the current

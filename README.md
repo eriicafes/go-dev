@@ -56,7 +56,8 @@ func main() {
 ```
 
 `dev.Package` builds its package into a temporary executable. `dev.Binary` starts
-an existing executable. Each replacement behind a proxy receives its own
+an existing executable. A replacement is built before the current process
+stops, so a failed build leaves it running. Each replacement behind a proxy receives its own
 loopback port through the `PORT` environment variable.
 
 ## Reloading
@@ -92,17 +93,23 @@ directory containing the development configuration.
 ### Arguments and environment
 
 `Args` are passed to every process. Arguments supplied to the development
-entrypoint are forwarded as well. `Env` adds environment variables to every
-process. `BuildEnv` adds environment variables to `dev.Package` builds.
+entrypoint are not forwarded unless `Args` uses `dev.OsArgs`, which works like
+`dev.Values` and appends them.
+
+`Env` is the environment of every process. Leaving it nil inherits the
+operating-system environment; any other value replaces it. `dev.OsEnv` inherits
+the environment and appends variables, and `dev.Getenv` inherits only the named
+keys that are set. Proxied processes always receive `PORT`. `BuildEnv` adds
+environment variables to the inherited environment of `dev.Package` builds.
 
 ```go
 err := session.Run(dev.Cmd{
 	Run: dev.Package("."),
-	Args: dev.Values(
+	Args: dev.OsArgs(
 		"-log-level=debug",
 		dev.Pair("-log-format", "json"),
 	),
-	Env: dev.Values(
+	Env: dev.OsEnv(
 		"APP_ENV=development",
 		dev.Pair("LOG_LEVEL", "debug"),
 	),
@@ -113,14 +120,22 @@ err := session.Run(dev.Cmd{
 session.Catch(err)
 ```
 
-Both processes start with the operating-system environment. `dev.Values` makes
-slices concise. `dev.Pair` joins two values with an equals sign.
+To pass only selected variables:
+
+```go
+Env: append(dev.Getenv("PATH", "HOME"), "APP_ENV=test"),
+```
+
+`dev.Values` makes slices concise. `dev.Pair` joins two values with an equals
+sign.
 
 ### Watching and timing
 
 `Watch` lists files or directories to poll. Changes to `*_test.go` files and
 paths named `.git` or `node_modules` are ignored by default. `WatchExclude`
 omits additional files or directories and supports `filepath.Match` patterns.
+A pattern without a path separator, such as `*.gen.go`, matches names at any
+depth. Reload errors are printed to stderr.
 The default polling interval is 250ms. A detected change waits for
 `ReloadDelay`, which defaults to 100ms, so nearby edits are coalesced.
 `GracePeriod` defaults to 5 seconds.
@@ -273,7 +288,8 @@ Add `goDevRefresh()` to `vite.config.ts` plugins.
 
 Wait blocks until the session receives an interrupt or termination signal, then
 closes every managed task. `Session.WaitTimeout` controls the graceful-shutdown
-limit and defaults to 10 seconds.
+limit and defaults to 10 seconds. A second signal kills every managed process
+immediately.
 
 #### `Session.Close`
 
@@ -285,8 +301,8 @@ Done closes after the full development session shuts down.
 
 #### `Session.Catch`
 
-Catch closes the development session and panics with a non-nil error. It keeps a
-small `main` function straightforward:
+Catch does nothing when its error is nil. Otherwise it closes the development
+session and panics with the error.
 
 ### Task
 

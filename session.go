@@ -27,10 +27,43 @@ type Session struct {
 	done      chan struct{}
 }
 
-// New creates a development session.
+// New creates a development session. The first interrupt or termination
+// signal starts a graceful shutdown; a later one kills every managed process.
 func New() *Session {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	return &Session{WaitTimeout: 10 * time.Second, ctx: ctx, stop: stop, done: make(chan struct{})}
+	ctx, stop := context.WithCancel(context.Background())
+	session := &Session{WaitTimeout: 10 * time.Second, ctx: ctx, stop: stop, done: make(chan struct{})}
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	go session.handleSignals(signals)
+	return session
+}
+
+func (session *Session) handleSignals(signals chan os.Signal) {
+	defer signal.Stop(signals)
+	for {
+		select {
+		case <-signals:
+			if session.ctx.Err() == nil {
+				session.stop()
+				continue
+			}
+			// Managed processes run in their own process groups and miss the
+			// terminal's signal, so kill them before restoring default handling.
+			session.kill()
+			return
+		case <-session.done:
+			return
+		}
+	}
+}
+
+func (session *Session) kill() {
+	session.mu.Lock()
+	tasks := append([]*Task(nil), session.tasks...)
+	session.mu.Unlock()
+	for _, task := range tasks {
+		task.kill()
+	}
 }
 
 // RunTask starts a Cmd and returns the Task handle.
