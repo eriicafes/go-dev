@@ -461,20 +461,11 @@ func (task *Task) args() []string {
 }
 
 func (task *Task) environment(port string) []string {
-	env := append([]string{}, os.Environ()...)
-	env = append(env, environment(task.cmd.Env)...)
+	env := append(os.Environ(), task.cmd.Env...)
 	if port != "" {
 		env = append(env, "PORT="+port)
 	}
 	return env
-}
-
-func environment(values [][2]string) []string {
-	entries := make([]string, 0, len(values))
-	for _, value := range values {
-		entries = append(entries, value[0]+"="+value[1])
-	}
-	return entries
 }
 
 func availableAddr() (string, error) {

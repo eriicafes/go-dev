@@ -111,7 +111,7 @@ BuildEnv: dev.Values(
 ```
 
 Both processes start with the operating-system environment. `dev.Values` makes
-slices concise. `dev.Pair` creates a two-value environment entry.
+slices concise. `dev.Pair` joins two values with an equals sign.
 
 ### Watching and timing
 

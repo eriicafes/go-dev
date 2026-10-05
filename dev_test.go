@@ -358,8 +358,8 @@ func TestWatchBuildsAndServesLatestSource(t *testing.T) {
 	assertBody(t, task.URL(), "two")
 }
 
-func TestValuesAndEnvironment(t *testing.T) {
-	got := environment(Values(Pair("PORT", "1234"), Pair("LOG_LEVEL", "debug")))
+func TestValuesAndPair(t *testing.T) {
+	got := Values(Pair("PORT", "1234"), Pair("LOG_LEVEL", "debug"))
 	want := []string{"PORT=1234", "LOG_LEVEL=debug"}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("environment = %#v, want %#v", got, want)

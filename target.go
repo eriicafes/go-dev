@@ -39,7 +39,7 @@ func (path Package) cmd(config Cmd) (*exec.Cmd, func(), error) {
 	}
 	build := exec.Command("go", "build", "-o", binary, packagePath)
 	build.Dir = config.Dir
-	build.Env = append(os.Environ(), environment(config.BuildEnv)...)
+	build.Env = append(os.Environ(), config.BuildEnv...)
 	build.Stdout = os.Stdout
 	build.Stderr = os.Stderr
 	if err := build.Run(); err != nil {
@@ -70,9 +70,9 @@ type Cmd struct {
 	// Args supplies command-line arguments to every process.
 	Args []string
 	// Env adds environment variables to every process.
-	Env [][2]string
+	Env []string
 	// BuildEnv adds environment variables to a Package build.
-	BuildEnv [][2]string
+	BuildEnv []string
 	// Dir is the working directory. For child commands, relative paths resolve
 	// from the parent command's Dir; otherwise they resolve from the current
 	// working directory.

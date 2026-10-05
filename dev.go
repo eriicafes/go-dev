@@ -21,5 +21,5 @@ func Dir(paths ...string) string {
 // Values returns a slice containing values.
 func Values[T any](values ...T) []T { return values }
 
-// Pair returns a slice containing key-value pairs.
-func Pair[T any](first, second T) [2]T { return [2]T{first, second} }
+// Pair joins key and value with an equals sign.
+func Pair(key, value string) string { return key + "=" + value }
