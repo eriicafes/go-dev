@@ -41,6 +41,7 @@ type Task struct {
 	closeOnce sync.Once
 	readyOnce sync.Once
 	closing   atomic.Bool
+	exitErr   error
 	done      chan struct{}
 	ready     chan struct{}
 	stopping  chan struct{}
@@ -145,6 +146,13 @@ func (task *Task) OnClose(hook func()) {
 
 // Done closes when the task finishes.
 func (task *Task) Done() <-chan struct{} { return task.done }
+
+// Wait blocks until the task finishes. It returns the active process's exit
+// error when that process ends before the task is closed.
+func (task *Task) Wait() error {
+	<-task.done
+	return task.exitErr
+}
 
 func (task *Task) normalizeCmd() error {
 	if task.cmd.Run == nil {
@@ -354,7 +362,7 @@ func (task *Task) reload(ctx context.Context) error {
 
 func (task *Task) startProcess(ctx context.Context) (*process, error) {
 	// The target may create a temporary build artifact with matching cleanup.
-	command, cleanup, err := task.cmd.Run.cmd(task.cmd)
+	command, cleanup, err := task.cmd.Run.Cmd(task.cmd)
 	if err != nil {
 		return nil, err
 	}
@@ -408,6 +416,9 @@ func (task *Task) waitProcess(process *process) {
 	current := task.active.Load() == process
 	closing := task.closing.Load()
 	watching := task.watcher != nil
+	if current && !closing && !watching {
+		task.exitErr = err
+	}
 	task.reloadMu.Unlock()
 	if current && !closing && !watching {
 		// Close the completed unwatched task.

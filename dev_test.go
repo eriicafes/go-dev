@@ -298,6 +298,23 @@ func TestProcessExitHook(t *testing.T) {
 	}
 }
 
+func TestTaskWaitReturnsProcessExitError(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "app.go")
+	if err := os.WriteFile(file, []byte("package main\nimport \"os\"\nfunc main() { os.Exit(1) }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	task, err := newSession(t).RunTask(Cmd{Run: Package(file)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := task.Wait(); err == nil {
+		t.Fatal("Wait error = nil, want process exit error")
+	}
+	if err := task.Wait(); err == nil {
+		t.Fatal("second Wait error = nil, want process exit error")
+	}
+}
+
 func TestProxyWaitsForFirstProcess(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		_, _ = writer.Write([]byte("ok"))
@@ -580,7 +597,7 @@ type blockingTarget struct {
 	release <-chan struct{}
 }
 
-func (command blockingTarget) cmd(Cmd) (*exec.Cmd, func(), error) {
+func (command blockingTarget) Cmd(Cmd) (*exec.Cmd, func(), error) {
 	close(command.started)
 	<-command.release
 	return exec.Command(os.Args[0]), func() {}, nil

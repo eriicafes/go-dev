@@ -72,33 +72,6 @@ When a watched path changes, go-dev builds a replacement process. With
 `ServerHealthTimeout` defaults to 30 seconds when a health path is set.
 Leaving `ServerHealthPath` empty promotes the replacement as soon as it starts.
 
-An external event can request the same replacement:
-
-```go
-if err := task.Reload(); err != nil {
-	log.Print(err)
-}
-```
-
-`Task.OnStart` runs after the first process becomes live. `Task.OnReload` runs
-after each later replacement becomes live. Both receive that process's PID.
-`Task.OnProcessExit` runs when any managed process exits and receives its PID
-and exit error.
-
-```go
-task.OnStart(func(pid int) {
-	log.Printf("first process %d is live", pid)
-})
-
-task.OnReload(func(pid int) {
-	log.Printf("replacement process %d is live", pid)
-})
-
-task.OnProcessExit(func(pid int, err error) {
-	log.Printf("process %d exited: %v", pid, err)
-})
-```
-
 ## Cmd configuration
 
 ### Paths
@@ -276,13 +249,64 @@ token.
 
 ## Lifecycle and shutdown
 
-`session.Wait()` waits for an interrupt or termination signal, then closes every
-managed task. `Session.WaitTimeout` controls the graceful-shutdown limit and
-defaults to 10 seconds.
+### Session
 
-`Task.Close(ctx)` closes one task. `Task.Done()` closes when an unwatched
-process exits, or after a watched task finishes closing. `Session.Done()` closes
-after the full development session shuts down.
+#### `Session.Wait`
 
-`session.Catch(err)` closes the development session and panics with a non-nil
-error, which keeps a small `main` function straightforward.
+Wait blocks until the session receives an interrupt or termination signal, then
+closes every managed task. `Session.WaitTimeout` controls the graceful-shutdown
+limit and defaults to 10 seconds.
+
+#### `Session.Close`
+
+Close shuts down every managed task. It is safe to call more than once.
+
+#### `Session.Done`
+
+Done closes after the full development session shuts down.
+
+#### `Session.Catch`
+
+Catch closes the development session and panics with a non-nil error. It keeps a
+small `main` function straightforward:
+
+### Task
+
+#### `Task.Reload`
+
+Reload starts a replacement process. When `ServerAddr` is configured, the old
+process remains available until the replacement becomes live.
+
+#### `Task.OnStart`
+
+OnStart runs asynchronously after the task's first process becomes live. It
+receives that process's PID.
+
+#### `Task.OnReload`
+
+OnReload runs asynchronously after each replacement process becomes live. It
+receives that process's PID.
+
+#### `Task.OnProcessExit`
+
+OnProcessExit runs asynchronously whenever a managed process exits. It receives
+the process's PID and exit error.
+
+#### `Task.Wait`
+
+Wait blocks until the task finishes. When an unwatched task's active process
+ends before the task is closed, Wait returns that process's exit error. A watched
+task continues waiting for changes until it is closed.
+
+#### `Task.Done`
+
+Done closes when an unwatched process exits, or after a watched task finishes
+closing.
+
+#### `Task.OnClose`
+
+OnClose registers cleanup that runs when the task closes.
+
+#### `Task.Close`
+
+Close stops the task and its child tasks. It is safe to call more than once.

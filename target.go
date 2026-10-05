@@ -9,14 +9,18 @@ import (
 	"time"
 )
 
-type target interface {
-	cmd(Cmd) (*exec.Cmd, func(), error)
+// Target prepares a process for a Cmd. On success, Cmd must return a non-nil
+// cleanup function that releases any resources created while preparing the
+// process.
+type Target interface {
+	Cmd(Cmd) (*exec.Cmd, func(), error)
 }
 
 // Binary starts name directly.
 type Binary string
 
-func (name Binary) cmd(Cmd) (*exec.Cmd, func(), error) {
+// Cmd prepares a command that runs name.
+func (name Binary) Cmd(Cmd) (*exec.Cmd, func(), error) {
 	if name == "" {
 		return nil, nil, errors.New("dev: binary name is required")
 	}
@@ -26,7 +30,8 @@ func (name Binary) cmd(Cmd) (*exec.Cmd, func(), error) {
 // Package builds and starts a Go package.
 type Package string
 
-func (path Package) cmd(config Cmd) (*exec.Cmd, func(), error) {
+// Cmd builds path and prepares its binary to run.
+func (path Package) Cmd(config Cmd) (*exec.Cmd, func(), error) {
 	dir, err := os.MkdirTemp("", "go-dev-")
 	if err != nil {
 		return nil, nil, fmt.Errorf("dev: create process directory: %w", err)
@@ -65,7 +70,7 @@ const (
 type Cmd struct {
 	// Run selects the process to start. Use Binary to start an executable or
 	// Package to build and start a Go package.
-	Run target
+	Run Target
 
 	// Args supplies command-line arguments to every process.
 	Args []string
