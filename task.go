@@ -80,7 +80,14 @@ func (task *Task) URL() string {
 	if task.listener == nil {
 		return ""
 	}
-	return "http://" + task.listener.Addr().String()
+	host, port, err := net.SplitHostPort(task.listener.Addr().String())
+	if err != nil {
+		return "http://" + task.listener.Addr().String()
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		host = "localhost"
+	}
+	return "http://" + net.JoinHostPort(host, port)
 }
 
 // Use adds middleware around a task's stable proxy. It applies when the task

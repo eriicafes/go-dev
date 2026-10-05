@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -88,6 +89,22 @@ func TestCmdWithoutServerDoesNotCreateProxy(t *testing.T) {
 	}
 	if got := task.URL(); got != "" {
 		t.Fatalf("worker URL = %q, want empty", got)
+	}
+}
+
+func TestURLNormalizesUnspecifiedHost(t *testing.T) {
+	listener, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	_, port, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := &Task{listener: listener}
+	if got, want := task.URL(), "http://localhost:"+port; got != want {
+		t.Fatalf("URL = %q, want %q", got, want)
 	}
 }
 
