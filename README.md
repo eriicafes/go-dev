@@ -8,8 +8,13 @@ Build, run, and reload Go applications from a Go development entrypoint.
 go get github.com/eriicafes/go-dev
 ```
 
-Create a development entrypoint such as `cmd/dev/main.go`, then run it with
-`go run ./cmd/dev`. It does not need to be part of the application package.
+Create a development entrypoint such as `dev/main.go`, then run it with:
+
+```sh
+go run ./dev
+```
+
+It does not need to be part of the application package.
 
 ## Quick start
 
@@ -25,9 +30,9 @@ import (
 func main() {
 	session := dev.New()
 	task, err := session.RunTask(dev.Cmd{
-		Dir:        dev.Dir("../.."),
-		Run:        dev.Package("./cmd/app"),
-		Watch:      dev.Values("."),
+		Dir:   dev.Dir(".."),
+		Run:   dev.Package("."),
+		Watch: dev.Values("."),
 
 		// Set this to expose the application through a stable HTTP proxy.
 		ServerAddr: ":8000",
@@ -40,6 +45,14 @@ func main() {
 	log.Printf("development proxy listening on %s", task.URL())
 	session.Catch(session.Wait())
 }
+```
+
+```text
+.
+├── dev/
+│   └── main.go
+├── go.mod
+└── main.go
 ```
 
 `dev.Package` builds its package into a temporary executable. `dev.Binary` starts
@@ -84,10 +97,10 @@ task.OnReload(func(pid int) {
 relative `Watch` paths. An empty `Dir` uses the current working directory.
 
 `dev.Dir` resolves paths from the Go source file containing the call, which is
-especially useful from a separate `cmd/dev` package:
+especially useful from a separate `dev` package:
 
 ```go
-Dir: dev.Dir("..", ".."),
+Dir: dev.Dir(".."),
 ```
 
 `dev.Dir()` returns that source file's directory. `dev.Dir(".")` resolves the
@@ -101,7 +114,7 @@ process. `BuildEnv` adds environment variables to `dev.Package` builds.
 
 ```go
 err := session.Run(dev.Cmd{
-	Run: dev.Package("./cmd/api"),
+	Run: dev.Package("."),
 	Args: dev.Values(
 		"-log-level=debug",
 		dev.Pair("-log-format", "json"),
@@ -138,7 +151,7 @@ or the development session closes.
 
 ```go
 err := session.Run(dev.Cmd{
-	Run: dev.Package("./cmd/api"),
+	Run: dev.Package("."),
 	Commands: dev.Commands(
 		dev.Cmd{
 			Run:   dev.Binary("pnpm"),
@@ -223,8 +236,8 @@ development server. Vite `update` and `full-reload` messages call
 import "github.com/eriicafes/go-dev/vite"
 
 api, err := session.RunTask(dev.Cmd{
-	Run:              dev.Package("./cmd/api"),
-	Watch:            dev.Values("./cmd/api"),
+	Run:              dev.Package("."),
+	Watch:            dev.Values("."),
 	ServerAddr:       ":8000",
 	ServerHealthPath: "/health",
 	Commands: dev.Commands(
