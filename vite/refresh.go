@@ -50,7 +50,11 @@ func (config Refresh) Use(task *dev.Task) error {
 			return
 		}
 		_ = response.Body.Close()
-		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		switch {
+		case response.StatusCode == http.StatusNotFound:
+			// Vite answers 404 when no plugin handles the refresh endpoint.
+			fmt.Fprintln(os.Stderr, "dev/vite: missing go-dev refresh plugin in vite config")
+		case response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices:
 			fmt.Fprintf(os.Stderr, "dev/vite: refresh browser: Vite returned %s\n", response.Status)
 		}
 	})
