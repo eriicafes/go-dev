@@ -38,7 +38,7 @@ func main() {
 		ServerAddr: ":8000",
 
 		// Set this when the application exposes a readiness endpoint.
-		ServerHealthPath: "/healthz",
+		ServerReadyPath: "/ready",
 	})
 	session.Catch(err)
 
@@ -66,12 +66,13 @@ When a watched path changes, go-dev builds a replacement process. With
 `ServerAddr` set, it exposes a stable HTTP proxy:
 
 1. The replacement starts on a private loopback port.
-2. When `ServerHealthPath` returns a 2xx or 3xx response, new proxy requests
+2. When `ServerReadyPath` returns a 2xx or 3xx response, new proxy requests
    switch to it.
 3. The old process may continue handling in-flight work for `GracePeriod`.
 
-`ServerHealthTimeout` defaults to 30 seconds when a health path is set.
-Leaving `ServerHealthPath` empty promotes the replacement as soon as it starts.
+Leaving `ServerReadyPath` empty promotes the replacement once its port accepts
+connections. `ServerReadyTimeout` bounds either check and defaults to 10
+seconds.
 
 ## Cmd configuration
 
@@ -194,10 +195,9 @@ replacement behavior:
 
 ```go
 api, err := session.RunTask(dev.Cmd{
-	Run:                 dev.Binary("node"),
-	Args:                dev.Values("server.mjs"),
-	ServerAddr:          ":8001",
-	ServerHealthPath:    "/health",
+	Run:             dev.Binary("node"),
+	Args:            dev.Values("server.mjs"),
+	ServerAddr:      ":8001",
 })
 session.Catch(err)
 
@@ -237,10 +237,9 @@ A nil or empty `Refresh.Watch` matches every reload event.
 import "github.com/eriicafes/go-dev/vite"
 
 api, err := session.RunTask(dev.Cmd{
-	Run:              dev.Package("."),
-	Watch:            dev.Values("templates"),
-	ServerAddr:       ":8000",
-	ServerHealthPath: "/health",
+	Run:             dev.Package("."),
+	Watch:           dev.Values("templates"),
+	ServerAddr:      ":8000",
 	Commands: dev.Commands(
 		dev.Cmd{
 			Run:   dev.Binary("pnpm"),

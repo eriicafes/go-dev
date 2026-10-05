@@ -183,8 +183,8 @@ func (task *Task) normalizeCmd() error {
 	task.cmd.Dir = dir
 	task.cmd.Watch = resolvePaths(dir, task.cmd.Watch)
 	task.cmd.WatchExclude = resolveExcludes(dir, task.cmd.WatchExclude)
-	if task.cmd.ServerAddr != "" && task.cmd.ServerHealthPath != "" && task.cmd.ServerHealthTimeout <= 0 {
-		task.cmd.ServerHealthTimeout = 30 * time.Second
+	if task.cmd.ServerAddr != "" && task.cmd.ServerReadyTimeout <= 0 {
+		task.cmd.ServerReadyTimeout = 10 * time.Second
 	}
 	if task.cmd.PollInterval <= 0 {
 		task.cmd.PollInterval = 250 * time.Millisecond
@@ -371,7 +371,7 @@ func (task *Task) reload(paths []string) error {
 		task.reloadMu.Unlock()
 		return err
 	}
-	// Promote only a process that started and passed its optional health check.
+	// Promote only a process that started and passed its readiness check.
 	task.active.Store(next)
 	task.readyOnce.Do(func() { close(task.ready) })
 	task.hooksMu.Lock()
@@ -431,13 +431,13 @@ func (task *Task) startProcess(ctx context.Context, command *exec.Cmd, cleanup f
 	task.processesMu.Lock()
 	task.processes[process] = struct{}{}
 	task.processesMu.Unlock()
-	// Observe exit before waiting for health so an early exit ends the check.
+	// Observe exit before waiting for readiness so an early exit ends the check.
 	go task.waitProcess(process)
-	if task.cmd.ServerAddr != "" && task.cmd.ServerHealthPath != "" {
+	if task.cmd.ServerAddr != "" {
 		// Keep this process private until it reports readiness.
-		if err := task.waitForHealth(ctx, process, target); err != nil {
+		if err := task.waitForReady(ctx, process, target); err != nil {
 			task.stopProcess(process, 0)
-			return nil, fmt.Errorf("dev: process did not become healthy: %w", err)
+			return nil, fmt.Errorf("dev: process did not become ready: %w", err)
 		}
 	}
 	return process, nil
@@ -474,27 +474,17 @@ func (task *Task) waitProcess(process *process) {
 	}
 }
 
-func (task *Task) waitForHealth(ctx context.Context, process *process, target *url.URL) error {
-	deadline := time.NewTimer(task.cmd.ServerHealthTimeout)
+func (task *Task) waitForReady(ctx context.Context, process *process, target *url.URL) error {
+	deadline := time.NewTimer(task.cmd.ServerReadyTimeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
-	path := task.cmd.ServerHealthPath
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-	endpoint := *target
-	endpoint.Path = path
-	client := &http.Client{Timeout: 500 * time.Millisecond}
+	ready := task.readinessCheck(target)
 	for {
-		// Retry non-ready responses until the process, caller, or deadline ends it.
-		request, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
-		response, err := client.Do(request)
-		if err == nil {
-			_ = response.Body.Close()
-			if response.StatusCode >= 200 && response.StatusCode < 400 {
-				return nil
-			}
+		// Retry until the process is ready or the process, caller, or deadline
+		// ends the check.
+		if ready(ctx) {
+			return nil
 		}
 		select {
 		case <-process.done:
@@ -502,9 +492,41 @@ func (task *Task) waitForHealth(ctx context.Context, process *process, target *u
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			return errors.New("health check timed out")
+			return errors.New("readiness check timed out")
 		case <-ticker.C:
 		}
+	}
+}
+
+func (task *Task) readinessCheck(target *url.URL) func(context.Context) bool {
+	if task.cmd.ServerReadyPath == "" {
+		// Without a ready path, a process is ready once its port accepts
+		// connections.
+		dialer := &net.Dialer{Timeout: 500 * time.Millisecond}
+		return func(ctx context.Context) bool {
+			conn, err := dialer.DialContext(ctx, "tcp", target.Host)
+			if err != nil {
+				return false
+			}
+			_ = conn.Close()
+			return true
+		}
+	}
+	path := task.cmd.ServerReadyPath
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	endpoint := *target
+	endpoint.Path = path
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	return func(ctx context.Context) bool {
+		request, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+		response, err := client.Do(request)
+		if err != nil {
+			return false
+		}
+		_ = response.Body.Close()
+		return response.StatusCode >= 200 && response.StatusCode < 400
 	}
 }
 

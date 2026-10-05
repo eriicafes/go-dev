@@ -20,17 +20,17 @@ import (
 	"time"
 )
 
-func TestReloadSwapsOnlyAfterReplacementIsHealthy(t *testing.T) {
+func TestReloadSwapsOnlyAfterReplacementIsReady(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "app.go")
 	writeGoApp(t, file, "ok")
 	live := make(chan int, 2)
 	server := newSession(t)
 	task, err := server.RunTask(Cmd{
-		GracePeriod:         10 * time.Millisecond,
-		Run:                 Package(file),
-		ServerAddr:          "127.0.0.1:3000",
-		ServerHealthPath:    "/",
-		ServerHealthTimeout: 10 * time.Second,
+		GracePeriod:        10 * time.Millisecond,
+		Run:                Package(file),
+		ServerAddr:         "127.0.0.1:3000",
+		ServerReadyPath:    "/",
+		ServerReadyTimeout: 10 * time.Second,
 		Plugins: Plugins(PluginFunc(func(task *Task) error {
 			onLive := func(pid int) { live <- pid }
 			task.OnStart(onLive)
@@ -60,9 +60,9 @@ func TestFailedReloadLeavesCurrentProcessLive(t *testing.T) {
 	writeGoApp(t, file, "one")
 	server := newSession(t)
 	task, err := server.RunTask(Cmd{Run: Package(file),
-		ServerAddr:          "127.0.0.1:3000",
-		ServerHealthPath:    "/",
-		ServerHealthTimeout: 10 * time.Second,
+		ServerAddr:         "127.0.0.1:3000",
+		ServerReadyPath:    "/",
+		ServerReadyTimeout: 10 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -74,12 +74,50 @@ func TestFailedReloadLeavesCurrentProcessLive(t *testing.T) {
 	assertBody(t, task.URL(), "one")
 }
 
-func TestEmptyHealthPathSkipsReadinessChecks(t *testing.T) {
+func TestEmptyReadyPathSkipsHTTPChecks(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "app.go")
-	writeNotHealthyGoApp(t, file)
+	writeNotReadyGoApp(t, file)
 	server := newSession(t)
-	if _, err := server.RunTask(Cmd{Run: Package(file), ServerAddr: "127.0.0.1:3000", ServerHealthTimeout: 100 * time.Millisecond}); err != nil {
-		t.Fatalf("RunTask with an empty ServerHealthPath = %v, want success", err)
+	if _, err := server.RunTask(Cmd{Run: Package(file), ServerAddr: "127.0.0.1:0", ServerReadyTimeout: 5 * time.Second}); err != nil {
+		t.Fatalf("RunTask with an empty ServerReadyPath = %v, want success", err)
+	}
+}
+
+func TestEmptyReadyPathWaitsForPort(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "app.go")
+	source := `package main
+import (
+    "net/http"
+    "os"
+    "time"
+)
+func main() {
+    time.Sleep(300 * time.Millisecond)
+    _ = http.ListenAndServe("127.0.0.1:"+os.Getenv("PORT"), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+        _, _ = w.Write([]byte("ok"))
+    }))
+}`
+	if err := os.WriteFile(file, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := newSession(t)
+	task, err := server.RunTask(Cmd{Run: Package(file), ServerAddr: "127.0.0.1:0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertBody(t, task.URL(), "ok")
+	if err := task.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	assertBody(t, task.URL(), "ok")
+}
+
+func TestEmptyReadyPathTimesOutWithoutPort(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "app.go")
+	writeWorker(t, file)
+	server := newSession(t)
+	if _, err := server.RunTask(Cmd{Run: Package(file), ServerAddr: "127.0.0.1:0", ServerReadyTimeout: 2 * time.Second}); err == nil {
+		t.Fatal("RunTask succeeded for a process that never listens")
 	}
 }
 
@@ -178,11 +216,11 @@ func TestCmdReloadsBehindProxy(t *testing.T) {
 	binary := buildWatchCmd(t, dir, file)
 	server := newSession(t)
 	task, err := server.RunTask(Cmd{
-		Run:                 Binary(binary),
-		Dir:                 dir,
-		ServerAddr:          "127.0.0.1:0",
-		ServerHealthPath:    "/",
-		ServerHealthTimeout: 5 * time.Second,
+		Run:                Binary(binary),
+		Dir:                dir,
+		ServerAddr:         "127.0.0.1:0",
+		ServerReadyPath:    "/",
+		ServerReadyTimeout: 5 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -422,9 +460,9 @@ func TestStartFailureReturnsWithoutWaitingForWatcher(t *testing.T) {
 	go func() {
 		server := New()
 		_, err := server.RunTask(Cmd{Run: Package(file),
-			ServerAddr:          "127.0.0.1:3000",
-			ServerHealthPath:    "/",
-			ServerHealthTimeout: 10 * time.Second,
+			ServerAddr:         "127.0.0.1:3000",
+			ServerReadyPath:    "/",
+			ServerReadyTimeout: 10 * time.Second,
 		})
 		server.stop()
 		finished <- err
@@ -447,14 +485,14 @@ func TestWatchBuildsAndServesLatestSource(t *testing.T) {
 	paths := make(chan []string, 1)
 	server := newSession(t)
 	task, err := server.RunTask(Cmd{
-		Dir:              watchPath,
-		Watch:            Values("."),
-		PollInterval:     10 * time.Millisecond,
-		ReloadDelay:      5 * time.Millisecond,
-		GracePeriod:      10 * time.Millisecond,
-		Run:              Package(file),
-		ServerAddr:       "127.0.0.1:3000",
-		ServerHealthPath: "/",
+		Dir:             watchPath,
+		Watch:           Values("."),
+		PollInterval:    10 * time.Millisecond,
+		ReloadDelay:     5 * time.Millisecond,
+		GracePeriod:     10 * time.Millisecond,
+		Run:             Package(file),
+		ServerAddr:      "127.0.0.1:3000",
+		ServerReadyPath: "/",
 		Plugins: Plugins(PluginFunc(func(task *Task) error {
 			onLive := func(pid int) { live <- pid }
 			task.OnStart(onLive)
@@ -759,7 +797,7 @@ func writeFailGoApp(t *testing.T, file string) {
 	}
 }
 
-func writeNotHealthyGoApp(t *testing.T, file string) {
+func writeNotReadyGoApp(t *testing.T, file string) {
 	t.Helper()
 	source := `package main
 import (
@@ -807,12 +845,15 @@ func writeStubbornWorker(t *testing.T, file string) {
 	t.Helper()
 	source := `package main
 import (
+    "net"
     "os"
     "os/signal"
     "strconv"
     "time"
 )
 func main() {
+    listener, _ := net.Listen("tcp", "127.0.0.1:"+os.Getenv("PORT"))
+    defer listener.Close()
     marker := os.Args[1]
     count, _ := strconv.Atoi(string(must(os.ReadFile(marker))))
     count++

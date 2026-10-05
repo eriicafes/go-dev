@@ -63,14 +63,14 @@ func main() {
 	}
 	session := dev.New()
 	task, err := session.RunTask(dev.Cmd{
-		Dir:              dir,
-		Run:              dev.Package(file),
-		Watch:            dev.Values("."),
-		PollInterval:     10 * time.Millisecond,
-		ReloadDelay:      5 * time.Millisecond,
-		ServerAddr:       "127.0.0.1:0",
-		ServerHealthPath: "/",
-		Plugins:          dev.Plugins(Refresh{Origin: vite.URL}),
+		Dir:             dir,
+		Run:             dev.Package(file),
+		Watch:           dev.Values("."),
+		PollInterval:    10 * time.Millisecond,
+		ReloadDelay:     5 * time.Millisecond,
+		ServerAddr:      "127.0.0.1:0",
+		ServerReadyPath: "/",
+		Plugins:         dev.Plugins(Refresh{Origin: vite.URL}),
 	})
 	if err != nil {
 		t.Fatal(err)

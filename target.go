@@ -94,20 +94,20 @@ type Cmd struct {
 	// ServerAddr enables a stable HTTP proxy. When empty, the command runs
 	// without a proxy or readiness checks.
 	ServerAddr string
-	// ServerHealthPath enables readiness checks when ServerAddr is non-empty. A
-	// 2xx or 3xx response marks a process live. The zero value skips health
-	// checks and promotes the process as soon as it starts.
-	ServerHealthPath string
-	// ServerHealthTimeout bounds one process's readiness check. It defaults to
-	// 30 seconds when ServerHealthPath is set.
-	ServerHealthTimeout time.Duration
+	// ServerReadyPath enables HTTP readiness checks when ServerAddr is
+	// non-empty. A 2xx or 3xx response marks a process live. The zero value
+	// marks a process live once its port accepts connections.
+	ServerReadyPath string
+	// ServerReadyTimeout bounds one process's readiness check. It defaults to
+	// 10 seconds when ServerAddr is set.
+	ServerReadyTimeout time.Duration
 
 	// PollInterval is how often Watch paths are checked. It defaults to 250ms.
 	PollInterval time.Duration
 	// ReloadDelay waits after a detected change before reloading. It defaults to
 	// 100ms and coalesces nearby file changes.
 	ReloadDelay time.Duration
-	// GracePeriod is how long a previous healthy process can drain. It defaults
+	// GracePeriod is how long a previous live process can drain. It defaults
 	// to 5 seconds.
 	GracePeriod time.Duration
 
