@@ -91,8 +91,8 @@ func (task *Task) Use(middleware Middleware) {
 	}
 }
 
-// OnReload registers a callback after a process becomes live. The callback
-// receives the process ID.
+// OnReload registers a callback to run asynchronously after a process becomes
+// live. The callback receives the process ID.
 func (task *Task) OnReload(hook func(pid int)) {
 	if hook == nil {
 		return
@@ -309,14 +309,14 @@ func (task *Task) reload(ctx context.Context) error {
 	task.hooksMu.Lock()
 	hooks := append([]func(int){}, task.hooks...)
 	task.hooksMu.Unlock()
-	// Hooks may reload or close the task, so run them without the reload lock.
+	// Hooks may reload or close the task, so release the reload lock first.
 	task.reloadMu.Unlock()
 	if previous != nil && task.cmd.ServerAddr != "" {
 		// The proxy now directs new requests to next while previous drains.
 		go task.stopProcess(previous, task.cmd.GracePeriod)
 	}
 	for _, hook := range hooks {
-		hook(next.command.Process.Pid)
+		go hook(next.command.Process.Pid)
 	}
 	return nil
 }

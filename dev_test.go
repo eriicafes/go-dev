@@ -217,21 +217,26 @@ func TestReloadHookCanReload(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "app.go")
 	writeWorker(t, file)
 	server := newSession(t)
-	var reloadErr error
+	reloadDone := make(chan error, 1)
 	var once sync.Once
 	if _, err := server.RunTask(Cmd{
 		Run: Package(file),
 		Plugins: Plugins(PluginFunc(func(task *Task) error {
 			task.OnReload(func(int) {
-				once.Do(func() { reloadErr = task.Reload() })
+				once.Do(func() { reloadDone <- task.Reload() })
 			})
 			return nil
 		})),
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if reloadErr != nil {
-		t.Fatal(reloadErr)
+	select {
+	case err := <-reloadDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reload hook did not finish")
 	}
 }
 
@@ -273,6 +278,7 @@ func TestPluginFailureClosesEarlierPluginResources(t *testing.T) {
 	server := newSession(t)
 	closed := make(chan struct{})
 	_, err := server.RunTask(Cmd{
+		Run:        Binary("unused"),
 		ServerAddr: "127.0.0.1:0",
 		Plugins: Plugins(
 			PluginFunc(func(task *Task) error {
