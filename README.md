@@ -80,12 +80,22 @@ if err := task.Reload(); err != nil {
 }
 ```
 
-`Task.OnReload` runs after a process becomes live and receives that process's
-PID.
+`Task.OnStart` runs after the first process becomes live. `Task.OnReload` runs
+after each later replacement becomes live. Both receive that process's PID.
+`Task.OnProcessExit` runs when any managed process exits and receives its PID
+and exit error.
 
 ```go
+task.OnStart(func(pid int) {
+	log.Printf("first process %d is live", pid)
+})
+
 task.OnReload(func(pid int) {
-	log.Printf("process %d is live", pid)
+	log.Printf("replacement process %d is live", pid)
+})
+
+task.OnProcessExit(func(pid int, err error) {
+	log.Printf("process %d exited: %v", pid, err)
 })
 ```
 
@@ -218,8 +228,12 @@ Plugins configure a task before its first process starts. Use
 ```go
 Plugins: dev.Plugins(
 	dev.PluginFunc(func(task *dev.Task) error {
-		task.OnReload(func(pid int) {
+		onLive := func(pid int) {
 			log.Printf("process %d is live", pid)
+		}
+		task.OnStart(onLive)
+		task.OnReload(func(pid int) {
+			onLive(pid)
 		})
 		return nil
 	}),

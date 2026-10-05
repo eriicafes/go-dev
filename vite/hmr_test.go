@@ -33,7 +33,9 @@ func TestHMRReloadsForViteUpdates(t *testing.T) {
 		Plugins: dev.Plugins(
 			devvite.HMR(devvite.Config{Origin: vite.server.URL, ConnectTimeout: time.Second}),
 			dev.PluginFunc(func(task *dev.Task) error {
-				task.OnReload(func(pid int) { live <- pid })
+				onLive := func(pid int) { live <- pid }
+				task.OnStart(onLive)
+				task.OnReload(onLive)
 				return nil
 			}),
 		),

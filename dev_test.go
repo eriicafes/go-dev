@@ -30,7 +30,9 @@ func TestReloadSwapsOnlyAfterReplacementIsHealthy(t *testing.T) {
 		ServerHealthPath:    "/",
 		ServerHealthTimeout: 10 * time.Second,
 		Plugins: Plugins(PluginFunc(func(task *Task) error {
-			task.OnReload(func(pid int) { live <- pid })
+			onLive := func(pid int) { live <- pid }
+			task.OnStart(onLive)
+			task.OnReload(onLive)
 			return nil
 		})),
 	})
@@ -236,7 +238,7 @@ func TestReloadHookCanReload(t *testing.T) {
 	server := newSession(t)
 	reloadDone := make(chan error, 1)
 	var once sync.Once
-	if _, err := server.RunTask(Cmd{
+	task, err := server.RunTask(Cmd{
 		Run: Package(file),
 		Plugins: Plugins(PluginFunc(func(task *Task) error {
 			task.OnReload(func(int) {
@@ -244,7 +246,11 @@ func TestReloadHookCanReload(t *testing.T) {
 			})
 			return nil
 		})),
-	}); err != nil {
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := task.Reload(); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -254,6 +260,41 @@ func TestReloadHookCanReload(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("reload hook did not finish")
+	}
+}
+
+func TestProcessExitHook(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "app.go")
+	if err := os.WriteFile(file, []byte("package main\nfunc main() {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	type exit struct {
+		pid int
+		err error
+	}
+	exited := make(chan exit, 1)
+	server := newSession(t)
+	if _, err := server.RunTask(Cmd{
+		Run: Package(file),
+		Plugins: Plugins(PluginFunc(func(task *Task) error {
+			task.OnProcessExit(func(pid int, err error) {
+				exited <- exit{pid: pid, err: err}
+			})
+			return nil
+		})),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-exited:
+		if got.pid <= 0 {
+			t.Fatalf("exit pid = %d, want positive", got.pid)
+		}
+		if got.err != nil {
+			t.Fatalf("exit error = %v, want nil", got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("process exit hook did not run")
 	}
 }
 
@@ -354,7 +395,9 @@ func TestWatchBuildsAndServesLatestSource(t *testing.T) {
 		ServerAddr:       "127.0.0.1:3000",
 		ServerHealthPath: "/",
 		Plugins: Plugins(PluginFunc(func(task *Task) error {
-			task.OnReload(func(pid int) { live <- pid })
+			onLive := func(pid int) { live <- pid }
+			task.OnStart(onLive)
+			task.OnReload(onLive)
 			return nil
 		})),
 	})

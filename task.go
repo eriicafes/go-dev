@@ -30,7 +30,9 @@ type Task struct {
 
 	reloadMu    sync.Mutex
 	hooksMu     sync.Mutex
-	hooks       []func(int)
+	startHooks  []func(int)
+	reloadHooks []func(int)
+	exitHooks   []func(int, error)
 	closeHooks  []func()
 	middlewares []Middleware
 
@@ -98,15 +100,37 @@ func (task *Task) Use(middleware Middleware) {
 	}
 }
 
-// OnReload registers a callback to run asynchronously after a process becomes
-// live. The callback receives the process ID.
+// OnStart registers a callback to run asynchronously after the task's first
+// process becomes live. The callback receives the process ID.
+func (task *Task) OnStart(hook func(pid int)) {
+	if hook == nil {
+		return
+	}
+	task.hooksMu.Lock()
+	defer task.hooksMu.Unlock()
+	task.startHooks = append(task.startHooks, hook)
+}
+
+// OnReload registers a callback to run asynchronously after a replacement
+// process becomes live. The callback receives the process ID.
 func (task *Task) OnReload(hook func(pid int)) {
 	if hook == nil {
 		return
 	}
 	task.hooksMu.Lock()
 	defer task.hooksMu.Unlock()
-	task.hooks = append(task.hooks, hook)
+	task.reloadHooks = append(task.reloadHooks, hook)
+}
+
+// OnProcessExit registers a callback to run asynchronously when a managed
+// process exits. The callback receives the process ID and its exit error.
+func (task *Task) OnProcessExit(hook func(pid int, err error)) {
+	if hook == nil {
+		return
+	}
+	task.hooksMu.Lock()
+	defer task.hooksMu.Unlock()
+	task.exitHooks = append(task.exitHooks, hook)
 }
 
 // OnClose registers cleanup to run when the task closes.
@@ -309,7 +333,12 @@ func (task *Task) reload(ctx context.Context) error {
 	task.active.Store(next)
 	task.readyOnce.Do(func() { close(task.ready) })
 	task.hooksMu.Lock()
-	hooks := append([]func(int){}, task.hooks...)
+	var hooks []func(int)
+	if previous == nil {
+		hooks = append(hooks, task.startHooks...)
+	} else {
+		hooks = append(hooks, task.reloadHooks...)
+	}
 	task.hooksMu.Unlock()
 	// Hooks may reload or close the task, so release the reload lock first.
 	task.reloadMu.Unlock()
@@ -365,10 +394,16 @@ func (task *Task) startProcess(ctx context.Context) (*process, error) {
 }
 
 func (task *Task) waitProcess(process *process) {
-	_ = process.command.Wait()
+	err := process.command.Wait()
 	// Clean up process artifacts.
 	process.cleanup()
 	close(process.done)
+	task.hooksMu.Lock()
+	hooks := append([]func(int, error){}, task.exitHooks...)
+	task.hooksMu.Unlock()
+	for _, hook := range hooks {
+		go hook(process.command.Process.Pid, err)
+	}
 	task.reloadMu.Lock()
 	current := task.active.Load() == process
 	closing := task.closing.Load()
