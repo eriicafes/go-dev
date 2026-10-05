@@ -1,0 +1,13 @@
+{
+  "name": "go-dev",
+  "version": "0.1.0",
+  "private": true,
+  "description": "",
+  "scripts": {},
+  "keywords": [],
+  "author": "Eric Afes <eriicafes@gmail.com>",
+  "license": "MIT",
+  "devDependencies": {
+    "@changesets/cli": "^3.0.3"
+  }
+}

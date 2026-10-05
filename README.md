@@ -1,0 +1,235 @@
+# go-dev
+
+`go-dev` builds, runs, and reloads Go applications from a Go development entrypoint.
+
+## Install
+
+```sh
+go get github.com/eriicafes/go-dev
+```
+
+Create a development entrypoint such as `cmd/dev/main.go`, then run it with
+`go run ./cmd/dev`. It does not need to be part of the application package.
+
+## Quick start
+
+```go
+package main
+
+import (
+	"log"
+
+	"github.com/eriicafes/go-dev"
+)
+
+func main() {
+	session := dev.New()
+	task, err := session.RunTask(dev.Cmd{
+		Dir:        dev.Dir("..", ".."),
+		Run:        dev.Package("./cmd/app"),
+		Watch:      dev.Values(".", "./templates"),
+		ServerAddr: ":8000",
+
+		// Set this when the application exposes a readiness endpoint.
+		ServerHealthPath: "/healthz",
+	})
+	session.Catch(err)
+
+	log.Printf("development session listening on %s", task.URL())
+	session.Catch(session.Wait())
+}
+```
+
+`dev.Package` builds its package into a temporary executable. `dev.Binary` starts
+an existing executable. Each replacement behind a proxy receives its own
+loopback port through the `PORT` environment variable.
+
+## Reloading
+
+When a watched path changes, go-dev builds a replacement process. With
+`ServerAddr` set, it exposes a stable HTTP proxy:
+
+1. The replacement starts on a private loopback port.
+2. When `ServerHealthPath` returns a 2xx or 3xx response, new proxy requests
+   switch to it.
+3. The old process may continue handling in-flight work for `GracePeriod`.
+
+`ServerHealthTimeout` defaults to 30 seconds when a health path is set.
+Leaving `ServerHealthPath` empty promotes the replacement as soon as it starts.
+Leaving `ServerAddr` empty is useful for workers and other non-HTTP programs;
+no proxy or health check is created.
+
+An external event can request the same replacement:
+
+```go
+if err := task.Reload(); err != nil {
+	log.Print(err)
+}
+```
+
+`Task.OnReload` runs after a process becomes live and receives that process's
+PID.
+
+```go
+task.OnReload(func(pid int) {
+	log.Printf("process %d is live", pid)
+})
+```
+
+## Cmd configuration
+
+### Paths
+
+`Dir` is the working directory for processes and package builds, and the base for
+relative `Watch` paths. An empty `Dir` uses the current working directory.
+
+`dev.Dir` resolves paths from the Go source file containing the call, which is
+especially useful from a separate `cmd/dev` package:
+
+```go
+Dir: dev.Dir("..", ".."),
+```
+
+`dev.Dir()` returns that source file's directory. `dev.Dir(".")` resolves the
+directory containing the development configuration.
+
+### Arguments and environment
+
+`Args` are passed to every process. Arguments supplied to the development
+entrypoint are forwarded as well. `Env` adds environment variables to every
+process. `BuildEnv` adds environment variables to `dev.Package` builds.
+
+```go
+Args: dev.Values("-log-level=debug"),
+Env: dev.Values(
+	dev.Pair("LOG_LEVEL", "debug"),
+	dev.Pair("FEATURE_X", "1"),
+),
+BuildEnv: dev.Values(
+	dev.Pair("CGO_ENABLED", "1"),
+),
+```
+
+Both processes start with the operating-system environment. `dev.Values` makes
+slices concise. `dev.Pair` creates a two-value environment entry.
+
+### Watching and timing
+
+`Watch` lists files or directories to poll. The default polling interval is
+250ms. A detected change waits for `ReloadDelay`, which defaults to 100ms, so
+nearby edits are coalesced. `GracePeriod` defaults to 5 seconds.
+
+## Commands
+
+`Commands` creates child tasks for related long-running processes. A child
+inherits its parent's working directory unless it sets `Dir`; a relative child
+directory resolves from the parent's `Dir`. A child stops when its parent task
+or the development session closes.
+
+```go
+Commands: dev.Commands(
+	dev.Cmd{
+		Run:   dev.Binary("pnpm"),
+		Args:  dev.Values("dev"),
+		Phase: dev.Before,
+	},
+	dev.Cmd{
+		Run:   dev.Binary("go"),
+		Args:  dev.Values("run", "./cmd/worker"),
+		Phase: dev.After,
+	},
+),
+```
+
+`dev.Before` starts a command before plugins and the parent's first process.
+`dev.After` starts it after the first process is live. The zero phase starts
+alongside the parent without an ordering guarantee.
+
+You can also run a command as its own task. Its `Dir` is resolved from the
+current working directory, and `Watch` makes it restart on changes. The task's
+`Reload` method restarts it explicitly.
+
+```go
+assets, err := session.RunTask(dev.Cmd{
+	Run:   dev.Binary("pnpm"),
+	Args:  dev.Values("dev"),
+	Watch: dev.Values("./web"),
+})
+session.Catch(err)
+
+// _ = assets.Reload()
+```
+
+Use `session.Run` when you do not need the returned task.
+
+### HTTP processes
+
+A `Cmd` that reads `PORT` can run behind a stable proxy and receive soft
+replacement behavior:
+
+```go
+api, err := session.RunTask(dev.Cmd{
+	Run:                 dev.Binary("node"),
+	Args:                dev.Values("server.mjs"),
+	ServerAddr:          ":8001",
+	ServerHealthPath:    "/health",
+})
+session.Catch(err)
+
+log.Printf("API listening on %s", api.URL())
+```
+
+A command that owns a fixed port, such as an ordinary Vite server, can omit
+`ServerAddr` and remains managed without a proxy.
+
+## Plugins
+
+Plugins configure a task before its first process starts. Use
+`dev.PluginFunc` for a small inline plugin or provide a type that implements
+`Use(*dev.Task) error`.
+
+```go
+Plugins: dev.Plugins(
+	dev.PluginFunc(func(task *dev.Task) error {
+		task.OnReload(func(pid int) {
+			log.Printf("process %d is live", pid)
+		})
+		return nil
+	}),
+),
+```
+
+### Vite HMR
+
+`github.com/eriicafes/go-dev/vite` listens to an already running Vite
+development session. Vite `update` and `full-reload` messages call
+`Task.Reload`, so the Go application is replaced when frontend changes arrive.
+
+```go
+import "github.com/eriicafes/go-dev/vite"
+
+// ...
+Commands: dev.Commands(
+	dev.Cmd{Run: dev.Binary("pnpm"), Args: dev.Values("vite"), Phase: dev.Before},
+),
+Plugins: dev.Plugins(
+	vite.HMR(vite.Config{Origin: "http://127.0.0.1:5173"}),
+),
+```
+
+`Origin` defaults to `http://127.0.0.1:5173`. Set `vite.Config.URL` to a full
+`ws://` or `wss://` URL when Vite uses a custom WebSocket host, port, path, or
+token.
+
+## Lifecycle and shutdown
+
+`session.Wait()` waits for an interrupt or termination signal, then closes every
+managed task. `Session.WaitTimeout` controls the graceful-shutdown limit and
+defaults to 10 seconds.
+
+`Task.Close(ctx)` closes one task. `Task.Done()` closes when an unwatched
+process exits, or after a watched task finishes closing. `Session.Done()` closes
+after the full development session shuts down.
+
+`session.Catch(err)` closes the development session and panics with a non-nil
+error, which keeps a small `main` function straightforward.
