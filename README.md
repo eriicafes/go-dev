@@ -1,6 +1,6 @@
 # go-dev
 
-`go-dev` builds, runs, and reloads Go applications from a Go development entrypoint.
+Build, run, and reload Go applications from a Go development entrypoint.
 
 ## Install
 
@@ -27,7 +27,9 @@ func main() {
 	task, err := session.RunTask(dev.Cmd{
 		Dir:        dev.Dir("..", ".."),
 		Run:        dev.Package("./cmd/app"),
-		Watch:      dev.Values(".", "./templates"),
+		Watch:      dev.Values("."),
+
+		// Set this to expose the application through a stable HTTP proxy.
 		ServerAddr: ":8000",
 
 		// Set this when the application exposes a readiness endpoint.
@@ -35,7 +37,7 @@ func main() {
 	})
 	session.Catch(err)
 
-	log.Printf("development session listening on %s", task.URL())
+	log.Printf("development proxy listening on %s", task.URL())
 	session.Catch(session.Wait())
 }
 ```
@@ -56,8 +58,6 @@ When a watched path changes, go-dev builds a replacement process. With
 
 `ServerHealthTimeout` defaults to 30 seconds when a health path is set.
 Leaving `ServerHealthPath` empty promotes the replacement as soon as it starts.
-Leaving `ServerAddr` empty is useful for workers and other non-HTTP programs;
-no proxy or health check is created.
 
 An external event can request the same replacement:
 
@@ -202,19 +202,31 @@ Plugins: dev.Plugins(
 ### Vite HMR
 
 `github.com/eriicafes/go-dev/vite` listens to an already running Vite
-development session. Vite `update` and `full-reload` messages call
+development server. Vite `update` and `full-reload` messages call
 `Task.Reload`, so the Go application is replaced when frontend changes arrive.
 
 ```go
 import "github.com/eriicafes/go-dev/vite"
 
-// ...
-Commands: dev.Commands(
-	dev.Cmd{Run: dev.Binary("pnpm"), Args: dev.Values("vite"), Phase: dev.Before},
-),
-Plugins: dev.Plugins(
-	vite.HMR(vite.Config{Origin: "http://127.0.0.1:5173"}),
-),
+api, err := session.RunTask(dev.Cmd{
+	Run:              dev.Package("./cmd/api"),
+	Watch:            dev.Values("./cmd/api"),
+	ServerAddr:       ":8000",
+	ServerHealthPath: "/health",
+	Commands: dev.Commands(
+		dev.Cmd{
+			Run:   dev.Binary("pnpm"),
+			Args:  dev.Values("vite"),
+			Phase: dev.Before,
+		},
+	),
+	Plugins: dev.Plugins(
+		vite.HMR(vite.Config{Origin: "http://127.0.0.1:5173"}),
+	),
+})
+session.Catch(err)
+
+log.Printf("API listening on %s", api.URL())
 ```
 
 `Origin` defaults to `http://127.0.0.1:5173`. Set `vite.Config.URL` to a full
