@@ -66,32 +66,22 @@ func (session *Session) kill() {
 	}
 }
 
-// RunTask starts a Cmd and returns the Task handle.
-func (session *Session) RunTask(cmd Cmd) (*Task, error) {
-	if !session.start() {
-		return nil, errors.New("dev: session is closed")
+// NewTask creates an unstarted task.
+func (session *Session) NewTask(cmd Cmd) *Task {
+	return &Task{
+		session:   session,
+		cmd:       cmd,
+		done:      make(chan struct{}),
+		ready:     make(chan struct{}),
+		started:   make(chan struct{}),
+		stopping:  make(chan struct{}),
+		processes: make(map[*process]struct{}),
 	}
-	defer session.starts.Done()
-	task, err := newTask(session, cmd)
-	if err != nil {
-		return nil, err
-	}
-	if err := task.start(); err != nil {
-		_ = task.Close(context.Background())
-		return nil, err
-	}
-	if !session.add(task) {
-		ctx, cancel := context.WithTimeout(context.Background(), session.WaitTimeout)
-		defer cancel()
-		return nil, errors.Join(errors.New("dev: session is closed"), task.Close(ctx))
-	}
-	return task, nil
 }
 
 // Run starts a Cmd when its Task handle is not needed.
 func (session *Session) Run(cmd Cmd) error {
-	_, err := session.RunTask(cmd)
-	return err
+	return session.NewTask(cmd).Run()
 }
 
 func (session *Session) start() bool {

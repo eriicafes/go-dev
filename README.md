@@ -29,7 +29,7 @@ import (
 
 func main() {
 	session := dev.New()
-	task, err := session.RunTask(dev.Cmd{
+	task := session.NewTask(dev.Cmd{
 		Dir:   dev.Dir(".."),
 		Run:   dev.Package("."),
 		Watch: dev.Values("."),
@@ -40,7 +40,7 @@ func main() {
 		// Set this when the application exposes a readiness endpoint.
 		ServerReadyPath: "/ready",
 	})
-	session.Catch(err)
+	session.Catch(task.Run())
 
 	log.Printf("development proxy listening on %s", task.URL())
 	session.Catch(session.Wait())
@@ -143,10 +143,26 @@ The default polling interval is 250ms. A detected change waits for
 
 ## Commands
 
-`Commands` creates child tasks for related long-running processes. A child
-inherits its parent's working directory unless it sets `Dir`; a relative child
-directory resolves from the parent's `Dir`. A child stops when its parent task
-or the development session closes.
+A task runs a `Cmd`. Its `Dir` resolves from the current working directory,
+`Watch` reloads it on changes, and `Reload` restarts it explicitly.
+
+```go
+assets := session.NewTask(dev.Cmd{
+	Run:   dev.Binary("pnpm"),
+	Args:  dev.Values("dev"),
+	Watch: dev.Values("./web"),
+})
+session.Catch(assets.Run())
+
+// _ = assets.Reload()
+```
+
+Use `session.Run` when you do not need the returned task.
+
+`Commands` is for child tasks that belong to another command. A child inherits
+its parent's working directory unless it sets `Dir`; a relative child directory
+resolves from the parent's `Dir`. A child stops when its parent task or the
+development session closes.
 
 ```go
 err := session.Run(dev.Cmd{
@@ -171,35 +187,18 @@ session.Catch(err)
 `dev.After` starts it after the first process is live. The zero phase starts
 alongside the parent without an ordering guarantee.
 
-You can also run a command as its own task. Its `Dir` is resolved from the
-current working directory, and `Watch` makes it restart on changes. The task's
-`Reload` method restarts it explicitly.
-
-```go
-assets, err := session.RunTask(dev.Cmd{
-	Run:   dev.Binary("pnpm"),
-	Args:  dev.Values("dev"),
-	Watch: dev.Values("./web"),
-})
-session.Catch(err)
-
-// _ = assets.Reload()
-```
-
-Use `session.Run` when you do not need the returned task.
-
 ### HTTP processes
 
 A `Cmd` that reads `PORT` can run behind a stable proxy and receive soft
 replacement behavior:
 
 ```go
-api, err := session.RunTask(dev.Cmd{
+api := session.NewTask(dev.Cmd{
 	Run:             dev.Binary("node"),
 	Args:            dev.Values("server.mjs"),
 	ServerAddr:      ":8001",
 })
-session.Catch(err)
+session.Catch(api.Run())
 
 log.Printf("API listening on %s", api.URL())
 ```
@@ -236,7 +235,7 @@ A nil or empty `Refresh.Watch` matches every reload event.
 ```go
 import "github.com/eriicafes/go-dev/vite"
 
-api, err := session.RunTask(dev.Cmd{
+api := session.NewTask(dev.Cmd{
 	Run:             dev.Package("."),
 	Watch:           dev.Values("templates"),
 	ServerAddr:      ":8000",
@@ -251,7 +250,7 @@ api, err := session.RunTask(dev.Cmd{
 		vite.Refresh{},
 	),
 })
-session.Catch(err)
+session.Catch(api.Run())
 
 log.Printf("API listening on %s", api.URL())
 ```

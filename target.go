@@ -16,6 +16,17 @@ type Target interface {
 	Cmd(Cmd) (*exec.Cmd, func(), error)
 }
 
+// TargetFunc adapts a function into a Target.
+type TargetFunc func(Cmd) (*exec.Cmd, func(), error)
+
+// Cmd prepares a command with target.
+func (target TargetFunc) Cmd(cmd Cmd) (*exec.Cmd, func(), error) {
+	if target == nil {
+		return nil, nil, errors.New("dev: target function is required")
+	}
+	return target(cmd)
+}
+
 // Binary starts name directly.
 type Binary string
 

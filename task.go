@@ -43,6 +43,9 @@ type Task struct {
 	childrenMu sync.Mutex
 	children   []*Task
 
+	runOnce sync.Once
+	runErr  error
+
 	closeOnce sync.Once
 	readyOnce sync.Once
 	closing   atomic.Bool
@@ -62,32 +65,11 @@ type process struct {
 	cleanup func()
 }
 
-func newTask(session *Session, cmd Cmd) (*Task, error) {
-	task := &Task{
-		session:   session,
-		cmd:       cmd,
-		done:      make(chan struct{}),
-		ready:     make(chan struct{}),
-		started:   make(chan struct{}),
-		stopping:  make(chan struct{}),
-		processes: make(map[*process]struct{}),
-	}
-	if task.cmd.ServerAddr == "" {
-		return task, nil
-	}
-	listener, err := net.Listen("tcp", task.cmd.ServerAddr)
-	if err != nil {
-		return nil, fmt.Errorf("dev: listen %s: %w", task.cmd.ServerAddr, err)
-	}
-	task.listener = listener
-	return task, nil
-}
-
 // Middleware wraps a task's stable proxy handler.
 type Middleware func(http.Handler) http.Handler
 
 // URL returns the task's stable proxy URL. It is empty when ServerAddr is not
-// configured.
+// configured or the task has not started.
 func (task *Task) URL() string {
 	if task.listener == nil {
 		return ""
@@ -165,6 +147,34 @@ func (task *Task) Wait() error {
 	return task.exitErr
 }
 
+// Run starts the task. Calling Run again returns the result of the first call.
+func (task *Task) Run() error {
+	task.runOnce.Do(func() {
+		task.runErr = task.run()
+	})
+	return task.runErr
+}
+
+func (task *Task) run() error {
+	if task.closing.Load() {
+		return errTaskClosing
+	}
+	if !task.session.start() {
+		return errors.New("dev: session is closed")
+	}
+	defer task.session.starts.Done()
+	if err := task.start(); err != nil {
+		_ = task.Close(context.Background())
+		return err
+	}
+	if task.session.add(task) {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), task.session.WaitTimeout)
+	defer cancel()
+	return errors.Join(errors.New("dev: session is closed"), task.Close(ctx))
+}
+
 func (task *Task) normalizeCmd() error {
 	if task.cmd.Run == nil {
 		return errors.New("dev: Run is required")
@@ -203,6 +213,13 @@ func (task *Task) start() error {
 	defer close(task.started)
 	if err := task.normalizeCmd(); err != nil {
 		return err
+	}
+	if task.cmd.ServerAddr != "" {
+		listener, err := net.Listen("tcp", task.cmd.ServerAddr)
+		if err != nil {
+			return fmt.Errorf("dev: listen %s: %w", task.cmd.ServerAddr, err)
+		}
+		task.listener = listener
 	}
 	if len(task.cmd.Watch) != 0 {
 		// Configure source watching.
@@ -277,10 +294,7 @@ func (task *Task) startChild(config Cmd) error {
 		// Child-relative directories resolve from the parent's working directory.
 		config.Dir = filepath.Join(task.cmd.Dir, config.Dir)
 	}
-	child, err := newTask(task.session, config)
-	if err != nil {
-		return err
-	}
+	child := task.session.NewTask(config)
 	// Register the child before it starts so parent shutdown always includes it.
 	task.childrenMu.Lock()
 	if task.closing.Load() {

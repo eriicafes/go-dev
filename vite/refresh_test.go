@@ -62,7 +62,7 @@ func main() {
 		t.Fatal(err)
 	}
 	session := dev.New()
-	task, err := session.RunTask(dev.Cmd{
+	task := session.NewTask(dev.Cmd{
 		Dir:             dir,
 		Run:             dev.Package(file),
 		Watch:           dev.Values("."),
@@ -72,7 +72,7 @@ func main() {
 		ServerReadyPath: "/",
 		Plugins:         dev.Plugins(Refresh{Origin: vite.URL}),
 	})
-	if err != nil {
+	if err := task.Run(); err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = session.Close(context.Background()) }()

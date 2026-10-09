@@ -25,7 +25,7 @@ func TestReloadSwapsOnlyAfterReplacementIsReady(t *testing.T) {
 	writeGoApp(t, file, "ok")
 	live := make(chan int, 2)
 	server := newSession(t)
-	task, err := server.RunTask(Cmd{
+	task := server.NewTask(Cmd{
 		GracePeriod:        10 * time.Millisecond,
 		Run:                Package(file),
 		ServerAddr:         "127.0.0.1:3000",
@@ -38,7 +38,7 @@ func TestReloadSwapsOnlyAfterReplacementIsReady(t *testing.T) {
 			return nil
 		})),
 	})
-	if err != nil {
+	if err := task.Run(); err != nil {
 		t.Fatal(err)
 	}
 	assertBody(t, task.URL(), "ok")
@@ -59,12 +59,12 @@ func TestFailedReloadLeavesCurrentProcessLive(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "app.go")
 	writeGoApp(t, file, "one")
 	server := newSession(t)
-	task, err := server.RunTask(Cmd{Run: Package(file),
+	task := server.NewTask(Cmd{Run: Package(file),
 		ServerAddr:         "127.0.0.1:3000",
 		ServerReadyPath:    "/",
 		ServerReadyTimeout: 10 * time.Second,
 	})
-	if err != nil {
+	if err := task.Run(); err != nil {
 		t.Fatal(err)
 	}
 	writeFailGoApp(t, file)
@@ -78,8 +78,9 @@ func TestEmptyReadyPathSkipsHTTPChecks(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "app.go")
 	writeNotReadyGoApp(t, file)
 	server := newSession(t)
-	if _, err := server.RunTask(Cmd{Run: Package(file), ServerAddr: "127.0.0.1:0", ServerReadyTimeout: 5 * time.Second}); err != nil {
-		t.Fatalf("RunTask with an empty ServerReadyPath = %v, want success", err)
+	task := server.NewTask(Cmd{Run: Package(file), ServerAddr: "127.0.0.1:0", ServerReadyTimeout: 5 * time.Second})
+	if err := task.Run(); err != nil {
+		t.Fatalf("Task.Run with an empty ServerReadyPath = %v, want success", err)
 	}
 }
 
@@ -101,8 +102,8 @@ func main() {
 		t.Fatal(err)
 	}
 	server := newSession(t)
-	task, err := server.RunTask(Cmd{Run: Package(file), ServerAddr: "127.0.0.1:0"})
-	if err != nil {
+	task := server.NewTask(Cmd{Run: Package(file), ServerAddr: "127.0.0.1:0"})
+	if err := task.Run(); err != nil {
 		t.Fatal(err)
 	}
 	assertBody(t, task.URL(), "ok")
@@ -116,8 +117,9 @@ func TestEmptyReadyPathTimesOutWithoutPort(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "app.go")
 	writeWorker(t, file)
 	server := newSession(t)
-	if _, err := server.RunTask(Cmd{Run: Package(file), ServerAddr: "127.0.0.1:0", ServerReadyTimeout: 2 * time.Second}); err == nil {
-		t.Fatal("RunTask succeeded for a process that never listens")
+	task := server.NewTask(Cmd{Run: Package(file), ServerAddr: "127.0.0.1:0", ServerReadyTimeout: 2 * time.Second})
+	if err := task.Run(); err == nil {
+		t.Fatal("Task.Run succeeded for a process that never listens")
 	}
 }
 
@@ -125,8 +127,8 @@ func TestCmdWithoutServerDoesNotCreateProxy(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "app.go")
 	writeWorker(t, file)
 	server := newSession(t)
-	task, err := server.RunTask(Cmd{Run: Package(file)})
-	if err != nil {
+	task := server.NewTask(Cmd{Run: Package(file)})
+	if err := task.Run(); err != nil {
 		t.Fatal(err)
 	}
 	if got := task.URL(); got != "" {
@@ -150,6 +152,27 @@ func TestURLNormalizesUnspecifiedHost(t *testing.T) {
 	}
 }
 
+func TestNewTaskDefersAndRunsOnce(t *testing.T) {
+	server := newSession(t)
+	calls := 0
+	task := server.NewTask(Cmd{Run: TargetFunc(func(Cmd) (*exec.Cmd, func(), error) {
+		calls++
+		return exec.Command(os.Args[0], "-test.run=^$"), func() {}, nil
+	})})
+	if calls != 0 {
+		t.Fatalf("target calls before Run = %d, want 0", calls)
+	}
+	if err := task.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := task.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("target calls after two Run calls = %d, want 1", calls)
+	}
+}
+
 func TestCmdWatchRestartsCommand(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "worker.go")
@@ -157,13 +180,13 @@ func TestCmdWatchRestartsCommand(t *testing.T) {
 	writeWatchCmd(t, file)
 	binary := buildWatchCmd(t, dir, file)
 	server := newSession(t)
-	task, err := server.RunTask(Cmd{
+	task := server.NewTask(Cmd{
 		Run:   Binary(binary),
 		Args:  Values(marker),
 		Dir:   dir,
 		Watch: Values(file),
 	})
-	if err != nil {
+	if err := task.Run(); err != nil {
 		t.Fatal(err)
 	}
 	firstPID := waitForPID(t, marker, 0)
@@ -191,8 +214,8 @@ func TestCmdReloadKeepsTaskRunning(t *testing.T) {
 	writeWatchCmd(t, file)
 	binary := buildWatchCmd(t, dir, file)
 	server := newSession(t)
-	task, err := server.RunTask(Cmd{Run: Binary(binary), Args: Values(marker), Dir: dir})
-	if err != nil {
+	task := server.NewTask(Cmd{Run: Binary(binary), Args: Values(marker), Dir: dir})
+	if err := task.Run(); err != nil {
 		t.Fatal(err)
 	}
 	firstPID := waitForPID(t, marker, 0)
@@ -215,14 +238,14 @@ func TestCmdReloadsBehindProxy(t *testing.T) {
 	writeCommandServer(t, file, "ok")
 	binary := buildWatchCmd(t, dir, file)
 	server := newSession(t)
-	task, err := server.RunTask(Cmd{
+	task := server.NewTask(Cmd{
 		Run:                Binary(binary),
 		Dir:                dir,
 		ServerAddr:         "127.0.0.1:0",
 		ServerReadyPath:    "/",
 		ServerReadyTimeout: 5 * time.Second,
 	})
-	if err != nil {
+	if err := task.Run(); err != nil {
 		t.Fatal(err)
 	}
 	assertBody(t, task.URL(), "ok")
@@ -245,14 +268,14 @@ func TestCmdClosesChildTasks(t *testing.T) {
 	writeWatchCmd(t, commandFile)
 	binary := buildWatchCmd(t, dir, commandFile)
 	server := newSession(t)
-	task, err := server.RunTask(Cmd{
+	task := server.NewTask(Cmd{
 		Run: Package(appFile),
 		Commands: Commands(Cmd{
 			Run:  Binary(binary),
 			Args: Values(marker),
 		}),
 	})
-	if err != nil {
+	if err := task.Run(); err != nil {
 		t.Fatal(err)
 	}
 	_ = waitForPID(t, marker, 0)
@@ -280,7 +303,7 @@ func TestTaskCloseWaitsForReplacedProcessCleanup(t *testing.T) {
 	binary := buildWatchCmd(t, dir, file)
 	cleaned := make(chan struct{}, 2)
 	server := newSession(t)
-	task, err := server.RunTask(Cmd{
+	task := server.NewTask(Cmd{
 		Run: cleanupTarget{
 			Target:  Binary(binary),
 			cleaned: cleaned,
@@ -290,7 +313,7 @@ func TestTaskCloseWaitsForReplacedProcessCleanup(t *testing.T) {
 		ServerAddr:  "127.0.0.1:0",
 		GracePeriod: 100 * time.Millisecond,
 	})
-	if err != nil {
+	if err := task.Run(); err != nil {
 		t.Fatal(err)
 	}
 	waitForStart(t, marker, 1)
@@ -318,7 +341,7 @@ func TestReloadHookCanReload(t *testing.T) {
 	server := newSession(t)
 	reloadDone := make(chan error, 1)
 	var once sync.Once
-	task, err := server.RunTask(Cmd{
+	task := server.NewTask(Cmd{
 		Run: Package(file),
 		Plugins: Plugins(PluginFunc(func(task *Task) error {
 			task.OnReload(func(int, []string) {
@@ -327,7 +350,7 @@ func TestReloadHookCanReload(t *testing.T) {
 			return nil
 		})),
 	})
-	if err != nil {
+	if err := task.Run(); err != nil {
 		t.Fatal(err)
 	}
 	if err := task.Reload(); err != nil {
@@ -354,7 +377,7 @@ func TestProcessExitHook(t *testing.T) {
 	}
 	exited := make(chan exit, 1)
 	server := newSession(t)
-	if _, err := server.RunTask(Cmd{
+	task := server.NewTask(Cmd{
 		Run: Package(file),
 		Plugins: Plugins(PluginFunc(func(task *Task) error {
 			task.OnProcessExit(func(pid int, err error) {
@@ -362,7 +385,8 @@ func TestProcessExitHook(t *testing.T) {
 			})
 			return nil
 		})),
-	}); err != nil {
+	})
+	if err := task.Run(); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -383,8 +407,8 @@ func TestTaskWaitReturnsProcessExitError(t *testing.T) {
 	if err := os.WriteFile(file, []byte("package main\nimport \"os\"\nfunc main() { os.Exit(1) }\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	task, err := newSession(t).RunTask(Cmd{Run: Package(file)})
-	if err != nil {
+	task := newSession(t).NewTask(Cmd{Run: Package(file)})
+	if err := task.Run(); err != nil {
 		t.Fatal(err)
 	}
 	if err := task.Wait(); err == nil {
@@ -432,7 +456,7 @@ func TestProxyWaitsForFirstProcess(t *testing.T) {
 func TestPluginFailureClosesEarlierPluginResources(t *testing.T) {
 	server := newSession(t)
 	closed := make(chan struct{})
-	_, err := server.RunTask(Cmd{
+	task := server.NewTask(Cmd{
 		Run:        Binary("unused"),
 		ServerAddr: "127.0.0.1:0",
 		Plugins: Plugins(
@@ -443,7 +467,7 @@ func TestPluginFailureClosesEarlierPluginResources(t *testing.T) {
 			PluginFunc(func(*Task) error { return errors.New("plugin failed") }),
 		),
 	})
-	if err == nil {
+	if err := task.Run(); err == nil {
 		t.Fatal("Start unexpectedly succeeded")
 	}
 	select {
@@ -459,21 +483,22 @@ func TestStartFailureReturnsWithoutWaitingForWatcher(t *testing.T) {
 	finished := make(chan error, 1)
 	go func() {
 		server := New()
-		_, err := server.RunTask(Cmd{Run: Package(file),
+		task := server.NewTask(Cmd{Run: Package(file),
 			ServerAddr:         "127.0.0.1:3000",
 			ServerReadyPath:    "/",
 			ServerReadyTimeout: 10 * time.Second,
 		})
+		err := task.Run()
 		server.stop()
 		finished <- err
 	}()
 	select {
 	case err := <-finished:
 		if err == nil {
-			t.Fatal("RunTask unexpectedly succeeded")
+			t.Fatal("Task.Run unexpectedly succeeded")
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("RunTask did not return after its app failed")
+		t.Fatal("Task.Run did not return after its app failed")
 	}
 }
 
@@ -484,7 +509,7 @@ func TestWatchBuildsAndServesLatestSource(t *testing.T) {
 	live := make(chan int, 2)
 	paths := make(chan []string, 1)
 	server := newSession(t)
-	task, err := server.RunTask(Cmd{
+	task := server.NewTask(Cmd{
 		Dir:             watchPath,
 		Watch:           Values("."),
 		PollInterval:    10 * time.Millisecond,
@@ -503,7 +528,7 @@ func TestWatchBuildsAndServesLatestSource(t *testing.T) {
 			return nil
 		})),
 	})
-	if err != nil {
+	if err := task.Run(); err != nil {
 		t.Fatal(err)
 	}
 	firstPID := <-live
@@ -704,9 +729,9 @@ func TestCloseRejectsTaskThatFinishesStarting(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	result := make(chan error, 1)
+	task := server.NewTask(Cmd{Run: blockingTarget{started: started, release: release}})
 	go func() {
-		_, err := server.RunTask(Cmd{Run: blockingTarget{started: started, release: release}})
-		result <- err
+		result <- task.Run()
 	}()
 	<-started
 
@@ -721,7 +746,7 @@ func TestCloseRejectsTaskThatFinishesStarting(t *testing.T) {
 	}
 	close(release)
 	if err := <-result; err == nil {
-		t.Fatal("RunTask unexpectedly succeeded after server shutdown")
+		t.Fatal("Task.Run unexpectedly succeeded after server shutdown")
 	}
 	if err := <-closed; err != nil {
 		t.Fatal(err)
