@@ -1,5 +1,14 @@
 # go-dev
 
+## 0.3.0
+
+### Minor Changes
+
+- 503f852: Add deferred task startup with Session.NewTask and Task.Run.
+- 957ac36: Add Prepare hooks that can validate or prepare a command before it
+  starts or reloads.
+- 503f852: Add TargetFunc for custom process targets.
+
 ## 0.2.0
 
 ### Minor Changes
