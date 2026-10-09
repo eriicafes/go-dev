@@ -206,6 +206,25 @@ log.Printf("API listening on %s", api.URL())
 A command that owns a fixed port, such as an ordinary Vite server, can omit
 `ServerAddr` and remains managed without a proxy.
 
+## Prepare
+
+`Prepare` runs synchronous hooks before every initial process and replacement.
+Use hooks for validation, code generation, or assets. They run serially with a
+session context. An error skips that start attempt and keeps the current proxied
+process live.
+
+```go
+api := session.NewTask(dev.Cmd{
+	Run: dev.Package("./cmd/api"),
+	Prepare: dev.Hooks(
+		dev.HookFunc(func(ctx context.Context, cmd dev.Cmd) error {
+			return generateOpenAPI(ctx, cmd.Dir)
+		}),
+	),
+})
+session.Catch(api.Run())
+```
+
 ## Plugins
 
 Plugins configure a task before its first process starts. Use

@@ -379,6 +379,17 @@ func (task *Task) reload(paths []string) error {
 		return errTaskClosing
 	}
 	previous := task.active.Load()
+	ctx, cancel := context.WithCancel(task.session.ctx)
+	defer cancel()
+	for _, hook := range task.cmd.Prepare {
+		if hook == nil {
+			continue
+		}
+		if err := hook.Prepare(ctx, task.cmd); err != nil {
+			task.reloadMu.Unlock()
+			return fmt.Errorf("dev: prepare: %w", err)
+		}
+	}
 	// Prepare the replacement first so a failed build keeps the old process.
 	// The target may create a temporary build artifact with matching cleanup.
 	command, cleanup, err := task.cmd.Run.Cmd(task.cmd)

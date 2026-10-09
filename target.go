@@ -1,6 +1,7 @@
 package dev
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -82,6 +83,10 @@ type Cmd struct {
 	// Run selects the process to start. Use Binary to start an executable or
 	// Package to build and start a Go package.
 	Run Target
+	// Prepare runs before the command's initial process and every replacement.
+	// Preparations run serially. An error aborts that start attempt before a
+	// replacement is built or an active process is stopped.
+	Prepare []Hook
 
 	// Args supplies command-line arguments to every process.
 	Args []string
@@ -133,6 +138,21 @@ type Cmd struct {
 
 // Commands returns a slice of commands.
 func Commands(commands ...Cmd) []Cmd { return commands }
+
+// Hook prepares a Cmd before it starts a process. Its context is cancelled
+// when the development session closes.
+type Hook interface {
+	Prepare(context.Context, Cmd) error
+}
+
+// Hooks returns a slice of hooks.
+func Hooks(hooks ...Hook) []Hook { return hooks }
+
+// HookFunc adapts a function into a Hook.
+type HookFunc func(context.Context, Cmd) error
+
+// Prepare runs the function.
+func (hook HookFunc) Prepare(ctx context.Context, cmd Cmd) error { return hook(ctx, cmd) }
 
 // Plugin configures a task before its first process starts.
 type Plugin interface {

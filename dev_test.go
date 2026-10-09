@@ -74,6 +74,63 @@ func TestFailedReloadLeavesCurrentProcessLive(t *testing.T) {
 	assertBody(t, task.URL(), "one")
 }
 
+func TestPrepareRunsBeforeEveryProcessStart(t *testing.T) {
+	server := newSession(t)
+	var calls int
+	var prepared bool
+	task := server.NewTask(Cmd{
+		Run: TargetFunc(func(Cmd) (*exec.Cmd, func(), error) {
+			if !prepared {
+				t.Fatal("target started before preparation")
+			}
+			prepared = false
+			return exec.Command(os.Args[0], "-test.run=^$"), func() {}, nil
+		}),
+		Prepare: Hooks(HookFunc(func(context.Context, Cmd) error {
+			calls++
+			prepared = true
+			return nil
+		})),
+	})
+	if err := task.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := task.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("prepare calls = %d, want 2", calls)
+	}
+}
+
+func TestFailedPrepareLeavesCurrentProcessLive(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "app.go")
+	writeGoApp(t, file, "one")
+	server := newSession(t)
+	fail := false
+	task := server.NewTask(Cmd{
+		Run: Package(file),
+		Prepare: Hooks(HookFunc(func(context.Context, Cmd) error {
+			if fail {
+				return errors.New("prepare failed")
+			}
+			return nil
+		})),
+		ServerAddr:         "127.0.0.1:0",
+		ServerReadyPath:    "/",
+		ServerReadyTimeout: 10 * time.Second,
+	})
+	if err := task.Run(); err != nil {
+		t.Fatal(err)
+	}
+	assertBody(t, task.URL(), "one")
+	fail = true
+	if err := task.Reload(); err == nil {
+		t.Fatal("Reload unexpectedly succeeded")
+	}
+	assertBody(t, task.URL(), "one")
+}
+
 func TestEmptyReadyPathSkipsHTTPChecks(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "app.go")
 	writeNotReadyGoApp(t, file)
