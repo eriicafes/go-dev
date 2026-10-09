@@ -152,6 +152,30 @@ func TestURLNormalizesUnspecifiedHost(t *testing.T) {
 	}
 }
 
+func TestUseBeforeRunAppliesMiddleware(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "app.go")
+	writeGoApp(t, file, "ok")
+	server := newSession(t)
+	task := server.NewTask(Cmd{Run: Package(file), ServerAddr: "127.0.0.1:0"})
+	task.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			writer.Header().Set("X-Go-Dev", "middleware")
+			next.ServeHTTP(writer, request)
+		})
+	})
+	if err := task.Run(); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.Get(task.URL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if got := response.Header.Get("X-Go-Dev"); got != "middleware" {
+		t.Fatalf("middleware header = %q, want middleware", got)
+	}
+}
+
 func TestNewTaskDefersAndRunsOnce(t *testing.T) {
 	server := newSession(t)
 	calls := 0
@@ -724,6 +748,32 @@ func TestWaitClosesServerAfterSignalContextCancellation(t *testing.T) {
 	}
 }
 
+func TestTaskCloseReturnsInitialError(t *testing.T) {
+	task := taskWithClosedListener(t)
+	first := task.Close(context.Background())
+	if !errors.Is(first, net.ErrClosed) {
+		t.Fatalf("first Close error = %v, want closed listener error", first)
+	}
+	if second := task.Close(context.Background()); !errors.Is(second, net.ErrClosed) {
+		t.Fatalf("second Close error = %v, want closed listener error", second)
+	}
+}
+
+func TestSessionCloseReturnsInitialError(t *testing.T) {
+	server := New()
+	task := taskWithClosedListener(t)
+	if !server.add(task) {
+		t.Fatal("add task to open session")
+	}
+	first := server.Close(context.Background())
+	if !errors.Is(first, net.ErrClosed) {
+		t.Fatalf("first Close error = %v, want closed listener error", first)
+	}
+	if second := server.Close(context.Background()); !errors.Is(second, net.ErrClosed) {
+		t.Fatalf("second Close error = %v, want closed listener error", second)
+	}
+}
+
 func TestCloseRejectsTaskThatFinishesStarting(t *testing.T) {
 	server := New()
 	started := make(chan struct{})
@@ -750,6 +800,23 @@ func TestCloseRejectsTaskThatFinishesStarting(t *testing.T) {
 	}
 	if err := <-closed; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func taskWithClosedListener(t *testing.T) *Task {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return &Task{
+		listener:  listener,
+		done:      make(chan struct{}),
+		stopping:  make(chan struct{}),
+		processes: make(map[*process]struct{}),
 	}
 }
 

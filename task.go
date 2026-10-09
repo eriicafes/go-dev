@@ -30,6 +30,7 @@ type Task struct {
 	http     *http.Server
 	active   atomic.Pointer[process]
 
+	startMu     sync.Mutex
 	reloadMu    sync.Mutex
 	processesMu sync.Mutex
 	processes   map[*process]struct{}
@@ -47,6 +48,7 @@ type Task struct {
 	runErr  error
 
 	closeOnce sync.Once
+	closeErr  error
 	readyOnce sync.Once
 	closing   atomic.Bool
 	forced    atomic.Bool
@@ -85,8 +87,7 @@ func (task *Task) URL() string {
 }
 
 // Use adds middleware around a task's stable proxy. It applies when the task
-// configures ServerAddr and must be called from a Plugin, before the proxy
-// starts.
+// configures ServerAddr and must be called before Run.
 func (task *Task) Use(middleware Middleware) {
 	if task.cmd.ServerAddr != "" && middleware != nil {
 		task.middlewares = append(task.middlewares, middleware)
@@ -211,6 +212,11 @@ func (task *Task) normalizeCmd() error {
 func (task *Task) start() error {
 	// An early process exit waits for start to finish before closing the task.
 	defer close(task.started)
+	task.startMu.Lock()
+	defer task.startMu.Unlock()
+	if task.closing.Load() {
+		return errTaskClosing
+	}
 	if err := task.normalizeCmd(); err != nil {
 		return err
 	}
@@ -318,6 +324,9 @@ func (task *Task) Close(ctx context.Context) error {
 	task.closeOnce.Do(func() {
 		// Prevent new reloads before stopping work already in progress.
 		task.closing.Store(true)
+		// Keep startup from publishing resources while shutdown tears them down.
+		task.startMu.Lock()
+		defer task.startMu.Unlock()
 		if task.watcher != nil {
 			// Stop a pending reload before taking the reload lock.
 			task.watcher.close()
@@ -352,9 +361,10 @@ func (task *Task) Close(ctx context.Context) error {
 		for _, hook := range slices.Backward(hooks) {
 			hook()
 		}
+		task.closeErr = result
 		close(task.done)
 	})
-	return result
+	return task.closeErr
 }
 
 // Reload starts a replacement process. Tasks with ServerAddr keep their

@@ -24,6 +24,7 @@ type Session struct {
 	starts    sync.WaitGroup
 	tasks     []*Task
 	closeOnce sync.Once
+	closeErr  error
 	done      chan struct{}
 }
 
@@ -166,9 +167,10 @@ func (session *Session) Close(ctx context.Context) error {
 			}
 		}
 		result = errors.Join(result, errors.Join(shutdownErrors...))
+		session.closeErr = result
 		close(session.done)
 	})
-	return result
+	return session.closeErr
 }
 
 func (session *Session) waitStarts(ctx context.Context) error {

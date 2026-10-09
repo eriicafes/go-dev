@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"time"
 )
 
@@ -19,7 +18,7 @@ type watcher struct {
 	reload  func([]string) error
 	stop    chan struct{}
 	done    chan struct{}
-	started atomic.Bool
+	started bool
 }
 
 func newWatcher(cmd *Cmd, reload func([]string) error) *watcher {
@@ -27,14 +26,13 @@ func newWatcher(cmd *Cmd, reload func([]string) error) *watcher {
 }
 
 func (w *watcher) start() {
-	// Mark started before launching the goroutine so close waits for it.
-	w.started.Store(true)
+	w.started = true
 	go w.watch()
 }
 
 func (w *watcher) close() {
 	close(w.stop)
-	if w.started.Load() {
+	if w.started {
 		<-w.done
 	}
 }
