@@ -1,5 +1,12 @@
 # go-dev
 
+## 0.4.0
+
+### Minor Changes
+
+- e0dadb2: Change Session.Catch to print errors to stderr and exit with status 1 after shutdown instead of panicking.
+- 4863504: Add Cmd.Skip to omit child commands and finish standalone tasks without starting resources.
+
 ## 0.3.0
 
 ### Minor Changes
