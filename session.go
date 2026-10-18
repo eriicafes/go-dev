@@ -3,6 +3,7 @@ package dev
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/signal"
 	"sync"
@@ -105,18 +106,17 @@ func (session *Session) add(task *Task) bool {
 	return true
 }
 
-// Catch closes the development session and panics with err. It does nothing
-// when err is nil.
+// Catch closes the development session, prints err and any shutdown error to
+// stderr, and exits with status 1. It does nothing when err is nil.
 func (session *Session) Catch(err error) {
 	if err == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), session.WaitTimeout)
-	defer cancel()
-	if closeErr := session.Close(ctx); closeErr != nil {
-		panic(errors.Join(err, closeErr))
-	}
-	panic(err)
+	closeErr := session.Close(ctx)
+	cancel()
+	fmt.Fprintln(os.Stderr, errors.Join(err, closeErr))
+	os.Exit(1)
 }
 
 // Wait blocks until the session receives an interrupt or termination signal,

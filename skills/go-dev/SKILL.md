@@ -203,8 +203,8 @@ error for an unwatched process; watched tasks stay alive until closed. Use
 `Session.Close(ctx)` and `Task.Close(ctx)` are safe to repeat.
 
 Prefer `session.Catch(...)` to handle errors from starting, reloading, waiting
-for, or closing tasks and sessions. For a non-nil error, it closes the session
-and panics with the error, including any shutdown error.
+for, or closing tasks and sessions. For a non-nil error, it closes the session,
+prints the error and any shutdown error to stderr, and exits with status 1.
 A nil error does nothing. Return errors from preparation hooks and plugin
 setup so the entrypoint can handle them through `session.Catch(task.Run())`.
 The session shutdown timeout defaults to 10 seconds through `WaitTimeout`.

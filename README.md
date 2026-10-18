@@ -338,7 +338,8 @@ Done closes after the full development session shuts down.
 #### `Session.Catch`
 
 Catch does nothing when its error is nil. Otherwise it closes the development
-session and panics with the error.
+session, prints the error and any shutdown error to stderr, and exits with
+status 1.
 
 ### Task
 
