@@ -16,6 +16,14 @@ go run ./dev
 
 It does not need to be part of the application package.
 
+## Agent skills
+
+Install the [go-dev skill](skills/README.md) for coding agents:
+
+```sh
+npx skills add eriicafes/go-dev
+```
+
 ## Quick start
 
 ```go
