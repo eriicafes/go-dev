@@ -254,6 +254,77 @@ func TestNewTaskDefersAndRunsOnce(t *testing.T) {
 	}
 }
 
+func TestSkippedCmdFinishesWithoutStartingResources(t *testing.T) {
+	failTarget := TargetFunc(func(Cmd) (*exec.Cmd, func(), error) {
+		t.Error("skipped target was prepared")
+		return nil, nil, errors.New("target should not run")
+	})
+	for _, config := range []Cmd{
+		{Skip: true},
+		{
+			Skip:       true,
+			Run:        failTarget,
+			ServerAddr: "invalid address",
+			Watch:      Values("."),
+			Prepare: Hooks(HookFunc(func(context.Context, Cmd) error {
+				t.Error("skipped preparation ran")
+				return errors.New("preparation should not run")
+			})),
+			Plugins: Plugins(PluginFunc(func(*Task) error {
+				t.Error("skipped plugin ran")
+				return errors.New("plugin should not run")
+			})),
+			Commands: []Cmd{{Run: failTarget}},
+		},
+	} {
+		server := newSession(t)
+		task := server.NewTask(config)
+		for range 2 {
+			if err := task.Run(); err != nil {
+				t.Fatalf("skipped Run = %v, want nil", err)
+			}
+		}
+		if err := task.Reload(); err != nil {
+			t.Fatalf("skipped Reload = %v, want nil", err)
+		}
+		select {
+		case <-task.Done():
+		default:
+			t.Fatal("skipped task did not finish")
+		}
+		if err := task.Wait(); err != nil {
+			t.Fatalf("skipped Wait = %v, want nil", err)
+		}
+		if task.URL() != "" || task.watcher != nil || len(task.children) != 0 {
+			t.Fatal("skipped task started resources")
+		}
+		if err := server.Run(config); err != nil {
+			t.Fatalf("skipped Session.Run = %v, want nil", err)
+		}
+	}
+}
+
+func TestSkippedChildrenAreOmittedInEveryPhase(t *testing.T) {
+	target := TargetFunc(func(Cmd) (*exec.Cmd, func(), error) {
+		return exec.Command(os.Args[0], "-test.run=^$"), func() {}, nil
+	})
+	task := newSession(t).NewTask(Cmd{
+		Run: target,
+		Commands: []Cmd{
+			{Skip: true, Phase: Before},
+			{Skip: true},
+			{Skip: true, Phase: After},
+			{Run: target, Phase: After},
+		},
+	})
+	if err := task.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if len(task.children) != 1 || task.children[0].cmd.Skip {
+		t.Fatalf("child tasks = %v, want only the enabled child", task.children)
+	}
+}
+
 func TestCmdWatchRestartsCommand(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "worker.go")
@@ -782,6 +853,23 @@ func TestCommandsPreservePhases(t *testing.T) {
 	commands := Commands(pre, post)
 	if len(commands) != 2 || commands[0].Phase != Before || commands[1].Phase != After {
 		t.Fatalf("command phases = %#v", commands)
+	}
+}
+
+func TestCommandsOmitSkippedWithoutChangingInput(t *testing.T) {
+	input := []Cmd{
+		{Skip: true, Phase: Before},
+		{Run: Binary("vite"), Phase: Before},
+		{Skip: true},
+		{Run: Binary("worker"), Phase: After},
+		{Skip: true, Phase: After},
+	}
+	commands := Commands(input...)
+	if len(commands) != 2 || commands[0].Run != Binary("vite") || commands[1].Run != Binary("worker") {
+		t.Fatalf("Commands = %#v, want vite then worker", commands)
+	}
+	if len(input) != 5 || !input[0].Skip || input[1].Run != Binary("vite") || !input[2].Skip || !input[4].Skip {
+		t.Fatalf("Commands modified its input: %#v", input)
 	}
 }
 

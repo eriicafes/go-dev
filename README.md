@@ -159,6 +159,17 @@ session.Catch(assets.Run())
 
 Use `session.Run` when you do not need the returned task.
 
+Set `Skip: true` to skip a command and its children. `Run` and `Reload` return nil,
+and `dev.Commands` omits skipped commands.
+
+```go
+err := session.Run(dev.Cmd{
+	Skip: os.Getenv("SKIP_WORKER") == "1",
+	Run:  dev.Package("./cmd/worker"),
+})
+session.Catch(err)
+```
+
 `Commands` is for child tasks that belong to another command. A child inherits
 its parent's working directory unless it sets `Dir`; a relative child directory
 resolves from the parent's `Dir`. A child stops when its parent task or the

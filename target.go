@@ -80,6 +80,10 @@ const (
 
 // Cmd configures a managed process.
 type Cmd struct {
+	// Skip omits the command and its children. Run and Reload return nil without
+	// starting resources, and the task finishes immediately when Run is called.
+	Skip bool
+
 	// Run selects the process to start. Use Binary to start an executable or
 	// Package to build and start a Go package.
 	Run Target
@@ -136,8 +140,16 @@ type Cmd struct {
 	Phase Phase
 }
 
-// Commands returns a slice of commands.
-func Commands(commands ...Cmd) []Cmd { return commands }
+// Commands returns a slice of commands, omitting those with Skip set.
+func Commands(commands ...Cmd) []Cmd {
+	result := make([]Cmd, 0, len(commands))
+	for _, command := range commands {
+		if !command.Skip {
+			result = append(result, command)
+		}
+	}
+	return result
+}
 
 // Hook prepares a Cmd before it starts a process. Its context is cancelled
 // when the development session closes.

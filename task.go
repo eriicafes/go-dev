@@ -148,7 +148,8 @@ func (task *Task) Wait() error {
 	return task.exitErr
 }
 
-// Run starts the task. Calling Run again returns the result of the first call.
+// Run starts the task, or finishes immediately when Cmd.Skip is set.
+// Calling Run again returns the result of the first call.
 func (task *Task) Run() error {
 	task.runOnce.Do(func() {
 		task.runErr = task.run()
@@ -157,6 +158,9 @@ func (task *Task) Run() error {
 }
 
 func (task *Task) run() error {
+	if task.cmd.Skip {
+		return task.Close(context.Background())
+	}
 	if task.closing.Load() {
 		return errTaskClosing
 	}
@@ -294,6 +298,9 @@ func (task *Task) start() error {
 }
 
 func (task *Task) startChild(config Cmd) error {
+	if config.Skip {
+		return nil
+	}
 	if config.Dir == "" {
 		config.Dir = task.cmd.Dir
 	} else if !filepath.IsAbs(config.Dir) {
@@ -368,10 +375,14 @@ func (task *Task) Close(ctx context.Context) error {
 }
 
 // Reload starts a replacement process. Tasks with ServerAddr keep their
-// current process live until the replacement is ready.
+// current process live until the replacement is ready. It returns nil without
+// starting a process when Cmd.Skip is set.
 func (task *Task) Reload() error { return task.reload(nil) }
 
 func (task *Task) reload(paths []string) error {
+	if task.cmd.Skip {
+		return nil
+	}
 	// Serialize replacement creation and promotion.
 	task.reloadMu.Lock()
 	if task.closing.Load() {
